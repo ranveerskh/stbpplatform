@@ -1,8 +1,6 @@
 {
   "name": "stbplay-platform",
-  "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
-  "engines": { "node": ">=22" }
+  "scripts": { "deploy": "firebase deploy --only functions,firestore:rules,hosting", "deploy:hosting": "firebase deploy --only hosting", "emulators": "firebase emulators:start --only functions,firestore,hosting,auth" },
+  "devDependencies": { "firebase-tools": "^14.0.0" }
 }

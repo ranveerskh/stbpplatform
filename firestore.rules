@@ -1,0 +1,7 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Dashboard and clients use validated Cloud Functions only.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
