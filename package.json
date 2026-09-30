@@ -1,6 +1,14 @@
 {
   "name": "stbplay-platform",
   "private": true,
-  "scripts": { "deploy": "firebase deploy --only firestore:rules,firestore:indexes,functions", "emulators": "firebase emulators:start --only functions,firestore,auth" },
-  "devDependencies": { "firebase-tools": "^14.0.0" }
+  "scripts": {
+    "deploy": "firebase deploy --only firestore:rules,firestore:indexes,functions",
+    "emulators": "firebase emulators:start --only functions,firestore,auth"
+  },
+  "devDependencies": {
+    "firebase-tools": "^14.0.0"
+  },
+  "overrides": {
+    "pg-protocol": "1.16.0"
+  }
 }
