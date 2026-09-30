@@ -16,9 +16,13 @@ async function refreshDashboard() {
   const result = (await listDashboard()).data;
   $('deviceCount').textContent = result.activeDevices;
   $('keyCount').textContent = result.activeKeys;
+  $('totalAppDevices').textContent = result.appUsage?.totalDevices ?? 0;
+  $('active24h').textContent = result.appUsage?.active24h ?? 0;
+  $('active7d').textContent = result.appUsage?.active7d ?? 0;
+  $('active30d').textContent = result.appUsage?.active30d ?? 0;
   $('androidCount').textContent = result.platformCounts.android;
   $('windowsCount').textContent = result.platformCounts.windows;
-  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td><span class="tag ${k.active?'on':'off'}">${k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="4">No keys yet</td></tr>';
+  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${k.expired||!k.active?'off':'on'}">${k.expired?'Expired':k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
   $('devicesBody').innerHTML = result.devices.map(d => `<tr><td>${escapeHtml(d.platform)}</td><td>${escapeHtml(d.appVersion)}</td><td>${escapeHtml(d.portalHost || '—')}</td><td>${d.lastSeen ? new Date(d.lastSeen).toLocaleString() : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No registered devices yet</td></tr>';
   for (const id of ['androidMinimumVersion','windowsMinimumVersion','androidUpdateUrl','windowsUpdateUrl']) $(id).value = result.settings[id] || '';
   document.querySelectorAll('[data-key]').forEach(button => button.addEventListener('click', async () => {
@@ -38,8 +42,12 @@ $('refresh').addEventListener('click', () => refreshDashboard().catch(e => alert
 $('newKey').addEventListener('click', async () => {
   const answer = prompt('Key label (optional):'); if (answer === null) return;
   const limit = Number(prompt('Maximum devices for this key?', '1') || 1);
+  const expiryInput = prompt('Exact expiry date/time in your local time (YYYY-MM-DDTHH:mm), or leave blank for no expiry:', '');
+  if (expiryInput === null) return;
+  const expiresAt = expiryInput.trim() ? new Date(expiryInput).getTime() : null;
+  if (expiryInput.trim() && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { alert('Enter a future expiry date and time.'); return; }
   try {
-    const result = (await createKey({ label:answer, deviceLimit:limit })).data;
+    const result = (await createKey({ label:answer, deviceLimit:limit, expiresAt })).data;
     $('newKeyResult').innerHTML = `Copy and save this key now; it is only shown once:<br><code>${escapeHtml(result.key)}</code>`;
     setVisible('newKeyResult', true); await refreshDashboard();
   } catch(error) { alert(friendlyError(error)); }

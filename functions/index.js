@@ -33,6 +33,21 @@ function versionInfo(platform, version, cfg) {
   const minimumVersion = cfg[`${platform}MinimumVersion`] || '1.0.0';
   return { platform, minimumVersion, updateRequired: outdated(version, minimumVersion), updateUrl: cfg[`${platform}UpdateUrl`] || '' };
 }
+function licenseInfo(data) {
+  return { licenseLabel: text(data.label, 100) || 'STB Play license', licenseExpiresAt: data.expiresAt?.toDate?.().toISOString() || null,
+    licenseExpired: !!data.expiresAt && data.expiresAt.toMillis() <= Date.now() };
+}
+async function recordAppUsage(deviceId, platform, appVersion) {
+  const ref = db.collection('appDevices').doc(hash(deviceId));
+  await db.runTransaction(async tx => {
+    const old = await tx.get(ref);
+    tx.set(ref, { platform, appVersion, firstSeen: old.exists ? old.data().firstSeen : stamp(), lastSeen: stamp(),
+      deleteAt: admin.firestore.Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000), active: true }, { merge: true });
+  });
+}
+function deviceDeleteAt() {
+  return admin.firestore.Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000);
+}
 async function readSettings() {
   const snap = await settingsRef.get();
   return { androidMinimumVersion: '1.0.0', windowsMinimumVersion: '1.0.0', androidUpdateUrl: '', windowsUpdateUrl: '', ...(snap.exists ? snap.data() : {}) };
@@ -47,28 +62,42 @@ exports.adminCreateKey = onCall({ region }, async request => {
   await requireAdmin(request);
   const label = text(request.data?.label, 100);
   const deviceLimit = Math.max(1, Math.min(100, Number(request.data?.deviceLimit) || 1));
+  const expiryInput = request.data?.expiresAt;
+  const expiresAtMillis = expiryInput == null || expiryInput === '' ? null : Number(expiryInput);
+  if (expiresAtMillis !== null && (!Number.isFinite(expiresAtMillis) || expiresAtMillis <= Date.now())) fail('invalid-argument', 'Expiry must be a future date and time.');
   const key = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
-  await keysRef.doc(hash(key)).set({ label, keyHint: key.slice(-4), active: true, deviceLimit, createdAt: stamp() });
-  return { key, keyHint: key.slice(-4), deviceLimit };
+  await keysRef.doc(hash(key)).set({ label, keyHint: key.slice(-4), active: true, deviceLimit,
+    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis), createdAt: stamp() });
+  return { key, keyHint: key.slice(-4), deviceLimit, expiresAt: expiresAtMillis };
 });
 
 exports.adminListDashboard = onCall({ region }, async request => {
   await requireAdmin(request);
-  const [keySnap, deviceSnap, activeKeysSnap, activeDevicesSnap, androidDevicesSnap, windowsDevicesSnap, settings] = await Promise.all([
+  const [keySnap, deviceSnap, activeKeysSnap, activeDevicesSnap, settings, totalAppDevicesSnap, active24hSnap, active7dSnap, active30dSnap, androidAppDevicesSnap, windowsAppDevicesSnap] = await Promise.all([
     keysRef.orderBy('createdAt', 'desc').limit(250).get(),
     db.collectionGroup('devices').where('active', '==', true).orderBy('lastSeen', 'desc').limit(100).get(),
-    keysRef.where('active', '==', true).count().get(),
+    keysRef.where('active', '==', true).get(),
     db.collectionGroup('devices').where('active', '==', true).count().get(),
-    db.collectionGroup('devices').where('active', '==', true).where('platform', '==', 'android').count().get(),
-    db.collectionGroup('devices').where('active', '==', true).where('platform', '==', 'windows').count().get(),
-    readSettings()
+    readSettings(),
+    db.collection('appDevices').count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 7 * 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('platform', '==', 'android').count().get(),
+    db.collection('appDevices').where('platform', '==', 'windows').count().get()
   ]);
   const keys = await Promise.all(keySnap.docs.map(async d => {
     const count = await d.ref.collection('devices').where('active', '==', true).count().get();
-    return { id: d.id, ...d.data(), deviceCount: count.data().count, createdAt: d.data().createdAt?.toDate?.().toISOString() || null };
+    const key = d.data();
+    const expiresAt = key.expiresAt?.toDate?.().toISOString() || null;
+    return { id: d.id, ...key, deviceCount: count.data().count, createdAt: key.createdAt?.toDate?.().toISOString() || null,
+      expiresAt, expired: !!key.expiresAt && key.expiresAt.toMillis() <= Date.now() };
   }));
   const devices = deviceSnap.docs.map(d => ({ id: d.id, keyId: d.ref.parent.parent?.id || '', ...d.data(), lastSeen: d.data().lastSeen?.toDate?.().toISOString() || null }));
-  return { keys, devices, activeKeys: activeKeysSnap.data().count, activeDevices: activeDevicesSnap.data().count, platformCounts: { android: androidDevicesSnap.data().count, windows: windowsDevicesSnap.data().count }, settings };
+  return { keys, devices, activeKeys: activeKeysSnap.docs.filter(d => d.data().active === true && (!d.data().expiresAt || d.data().expiresAt.toMillis() > Date.now())).length, activeDevices: activeDevicesSnap.data().count,
+    appUsage: { totalDevices: totalAppDevicesSnap.data().count, active24h: active24hSnap.data().count,
+      active7d: active7dSnap.data().count, active30d: active30dSnap.data().count },
+    platformCounts: { android: androidAppDevicesSnap.data().count, windows: windowsAppDevicesSnap.data().count }, settings };
 });
 
 exports.adminSetKeyStatus = onCall({ region }, async request => {
@@ -108,6 +137,12 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
       if (!['android', 'windows'].includes(platform) || !parts(version)) return res.status(400).json({ error: 'Supported platform and valid app version are required.' });
       return res.status(200).json(versionInfo(platform, version, await readSettings()));
     }
+    if (method === 'POST' && route === '/api/usage/heartbeat') {
+      const deviceId = text(req.body?.deviceId, 128), platform = text(req.body?.platform, 20).toLowerCase();
+      const appVersion = text(req.body?.appVersion, 32);
+      if (!deviceId || !['android', 'windows'].includes(platform) || !parts(appVersion)) return res.status(400).json({ error: 'Device ID, platform, and valid app version are required.' });
+      return res.status(200).json({ ok: true });
+    }
     if (method === 'POST' && route === '/api/register') {
       const key = text(req.body?.licenseKey, 80), deviceId = text(req.body?.deviceId, 128);
       const platform = text(req.body?.platform, 20).toLowerCase(), appVersion = text(req.body?.appVersion, 32);
@@ -115,15 +150,17 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
       const keyRef = keysRef.doc(hash(key)), deviceRef = keyRef.collection('devices').doc(hash(deviceId));
       const [cfg, result] = await Promise.all([readSettings(), db.runTransaction(async tx => {
         const [keyDoc, deviceDoc] = await Promise.all([tx.get(keyRef), tx.get(deviceRef)]);
-        if (!keyDoc.exists || keyDoc.data().active !== true) return { status: 403, body: { error: 'Registration key is invalid or disabled.' } };
+        if (!keyDoc.exists || keyDoc.data().active !== true) return { status: 403, body: { error: 'Registration key is invalid or disabled.', code: 'license_invalid' } };
+        if (keyDoc.data().expiresAt && keyDoc.data().expiresAt.toMillis() <= Date.now()) return { status: 403, body: { error: 'Registration key has expired.', code: 'license_expired', expiresAt: keyDoc.data().expiresAt.toDate().toISOString() } };
         if (!deviceDoc.exists) {
           const active = await tx.get(keyRef.collection('devices').where('active', '==', true));
           if (active.size >= (keyDoc.data().deviceLimit || 1)) return { status: 409, body: { error: 'Registration key device limit reached.' } };
         }
-        tx.set(deviceRef, { platform, appVersion, portalHost: safeHost(req.body?.portalHost), registeredAt: deviceDoc.exists ? deviceDoc.data().registeredAt : stamp(), lastSeen: stamp(), active: true }, { merge: true });
+        tx.set(deviceRef, { platform, appVersion, portalHost: safeHost(req.body?.portalHost), registeredAt: deviceDoc.exists ? deviceDoc.data().registeredAt : stamp(), lastSeen: stamp(), deleteAt: deviceDeleteAt(), active: true }, { merge: true });
         return { status: 200, body: { registered: true } };
       })]);
-      return res.status(result.status).json(result.status === 200 ? { ...result.body, ...versionInfo(platform, appVersion, cfg) } : result.body);
+      const keyDoc = result.status === 200 ? await keyRef.get() : null;
+      return res.status(result.status).json(result.status === 200 ? { ...result.body, ...licenseInfo(keyDoc.data()), ...versionInfo(platform, appVersion, cfg) } : result.body);
     }
     if (method === 'POST' && route === '/api/heartbeat') {
       const key = text(req.body?.licenseKey, 80), deviceId = text(req.body?.deviceId, 128);
@@ -131,9 +168,10 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
       if (!key || !deviceId || !['android', 'windows'].includes(platform) || !parts(appVersion)) return res.status(400).json({ error: 'Registration key, device ID, platform, and valid app version are required.' });
       const keyRef = keysRef.doc(hash(key)), deviceRef = keyRef.collection('devices').doc(hash(deviceId));
       const [keyDoc, deviceDoc, cfg] = await Promise.all([keyRef.get(), deviceRef.get(), readSettings()]);
-      if (!keyDoc.exists || keyDoc.data().active !== true || !deviceDoc.exists || deviceDoc.data().active === false) return res.status(403).json({ registered: false, error: 'Device registration is missing or disabled.' });
-      await deviceRef.update({ platform, appVersion, portalHost: safeHost(req.body?.portalHost), lastSeen: stamp() });
-      return res.status(200).json({ registered: true, ...versionInfo(platform, appVersion, cfg) });
+      if (!keyDoc.exists || keyDoc.data().active !== true || !deviceDoc.exists || deviceDoc.data().active === false) return res.status(403).json({ registered: false, error: 'Device registration is missing or disabled.', code: 'license_invalid' });
+      if (keyDoc.data().expiresAt && keyDoc.data().expiresAt.toMillis() <= Date.now()) return res.status(403).json({ registered: false, error: 'Registration key has expired.', code: 'license_expired', ...licenseInfo(keyDoc.data()) });
+      await deviceRef.update({ platform, appVersion, portalHost: safeHost(req.body?.portalHost), lastSeen: stamp(), deleteAt: deviceDeleteAt() });
+      return res.status(200).json({ registered: true, ...licenseInfo(keyDoc.data()), ...versionInfo(platform, appVersion, cfg) });
     }
     return res.status(404).json({ error: 'Endpoint not found.' });
   } catch (error) {
