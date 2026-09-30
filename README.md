@@ -30,7 +30,7 @@ Firebase Functions deployment requires a linked billing account (Blaze); it has 
 
 ## Admin dashboard
 
-Open the Netlify URL and sign in with the Email/Password account. The account must have an active document at `admins/{uid}`. From the dashboard, issue/revoke registration keys and set separate Android and Windows minimum versions/update URLs. A registration key is shown only once; the database stores its SHA-256 hash, not the original key.
+Open the Netlify URL and sign in with the Email/Password account. The account must have an active document at `admins/{uid}`. From the dashboard, issue/revoke registration keys, choose an exact expiry date/time, and set separate Android and Windows minimum versions/update URLs. The dashboard shows opted-in Android installation activity for the last 24 hours, 7 days, 30 days, and 12 months; licensed devices are listed separately. These are device/install counts, not verified individual people. Free Windows installs are not counted until the Windows app integrates the usage heartbeat. A registration key is shown only once; the database stores its SHA-256 hash, not the original key.
 
 ## App API
 
@@ -39,10 +39,11 @@ Netlify proxies `/api/**` to the `appApi` HTTPS function:
 - `GET /api/config?platform=android|windows&version=x.y.z`
 - `POST /api/register` JSON: `licenseKey`, `deviceId`, `platform`, `appVersion`, optional `portalHost`
 - `POST /api/heartbeat` JSON: `licenseKey`, `deviceId`, `platform`, `appVersion`, optional `portalHost`
+- `POST /api/usage/heartbeat` JSON: `deviceId`, `platform`, `appVersion`; clients should send this only after obtaining the user's consent for basic usage counts.
 
 Responses carry `updateRequired`, `minimumVersion`, and `updateUrl`. Each app must integrate the API and block outdated use with its own update-required UI; a setting in Firebase cannot stop an app that never checks it. If a check cannot reach the service, apps should show retry and preserve local settings/data.
 
-Device IDs should be random per installation. Only portal hostname, app version, platform, anonymous installation ID hash, and timestamps are retained; do not send/store portal credentials, MAC addresses, full URLs/query strings, raw IPs, or watched titles. The Windows app needs HTTPS requests to the function; no admin key or service-account secret belongs inside either app.
+Device IDs should be pseudonymous and must never contain credentials or personal data; the backend hashes them before storing usage or licence device records. Usage records expire after 12 months without a heartbeat. Licence registration records retain only the portal hostname (not the full URL), app version, platform, the device ID hash, and activity timestamps; do not send/store portal credentials, MAC addresses, full URLs/query strings, raw IPs, or watched titles. The Windows app needs HTTPS requests to the function; no admin key or service-account secret belongs inside either app.
 
 ## Current setup limits
 
