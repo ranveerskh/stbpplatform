@@ -1,6 +1,6 @@
 # STB Play shared Firebase platform
 
-This repository hosts the shared admin dashboard and backend for the Android and Windows apps. It uses Firebase Hosting, Firebase Authentication, Cloud Functions, and Cloud Firestore. Each app keeps its own release/update channel; the platform shares registration keys, device status, and minimum-version rules.
+This repository contains the Netlify-hosted admin dashboard and Firebase backend for the Android and Windows apps. Netlify serves the static dashboard and proxies `/api/*`; Firebase Authentication, Cloud Functions, and Cloud Firestore handle login, validation, and shared data. Each app keeps its own release/update channel; the platform shares registration keys, device status, and minimum-version rules.
 
 ## Firebase Console setup
 
@@ -9,29 +9,32 @@ This repository hosts the shared admin dashboard and backend for the Android and
 3. In Firestore, add collection `admins`. Add a document whose document ID is the admin user's **UID** from Authentication. Set fields: `active` (boolean) = `true`, and `role` (string) = `admin`.
 4. In Firestore Rules, publish the rules from `firestore.rules` (deny direct client reads/writes; all access goes through authorized Cloud Functions).
 5. The Web app config is in `public/firebase-config.js`. Firebase web config/API key identifies the project; it is not a server secret. Firestore rules and admin checks protect data.
+6. After Netlify gives you a site URL, add that hostname under Authentication → Settings → Authorized domains (for example, `your-site.netlify.app`).
 
 This app does not use **Realtime Database**. If you enabled it by accident, its safe deny-all rules are in `database.rules.json`; do not put app records there.
 
 ## Deploy
 
-Install Node.js 22+, then in this repository:
+Connect this GitHub repository to Netlify. The included `netlify.toml` publishes the `public` folder without a build step. Netlify's external rewrite proxies `/api/*` to the Firebase HTTPS function while the visible website remains on Netlify.
+
+Install Node.js 22+, then in this repository to deploy only the Firebase backend and rules:
 
 ```sh
 npm install
 cd functions && npm install && cd ..
 npx firebase-tools login
-npx firebase-tools deploy --only firestore:rules,firestore:indexes,functions,hosting
+npx firebase-tools deploy --only firestore:rules,firestore:indexes,functions
 ```
 
 Firebase Functions deployment requires a linked billing account (Blaze); it has usage-based pricing. Set Google Cloud budget alerts before deploying and review actual service pricing for expected traffic.
 
 ## Admin dashboard
 
-Open the Firebase Hosting URL and sign in with the Email/Password account. The account must have an active document at `admins/{uid}`. From the dashboard, issue/revoke registration keys and set separate Android and Windows minimum versions/update URLs. A registration key is shown only once; the database stores its SHA-256 hash, not the original key.
+Open the Netlify URL and sign in with the Email/Password account. The account must have an active document at `admins/{uid}`. From the dashboard, issue/revoke registration keys and set separate Android and Windows minimum versions/update URLs. A registration key is shown only once; the database stores its SHA-256 hash, not the original key.
 
 ## App API
 
-Firebase Hosting rewrites `/api/**` to the `appApi` HTTPS function:
+Netlify proxies `/api/**` to the `appApi` HTTPS function:
 
 - `GET /api/config?platform=android|windows&version=x.y.z`
 - `POST /api/register` JSON: `licenseKey`, `deviceId`, `platform`, `appVersion`, optional `portalHost`
@@ -43,4 +46,4 @@ Device IDs should be random per installation. Only portal hostname, app version,
 
 ## Current setup limits
 
-The web dashboard and backend source are ready for deployment. Firebase Console setup, Functions/Hosting deployment, domain setup, and Android/Windows client integration are still required. Turn on appropriate App Check protections for supported clients before public launch; also review Firebase Authentication authorized domains and API key restrictions. Test rules and app update behavior before relying on remote version enforcement.
+The web dashboard and backend source are ready for deployment. Firebase Console setup, Functions deployment, Netlify site connection/domain setup, and Android/Windows client integration are still required. Turn on appropriate App Check protections for supported clients before public launch; also review Firebase Authentication authorized domains and API key restrictions. Test rules and app update behavior before relying on remote version enforcement.
