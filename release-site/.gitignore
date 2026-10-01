@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.netlify/
+.env
+.env.local
+.firebase/
+service-account*.json
+*.log

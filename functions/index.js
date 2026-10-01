@@ -2,6 +2,7 @@ const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https')
 const logger = require('firebase-functions/logger');
 const admin = require('firebase-admin');
 const { createHash, randomBytes } = require('node:crypto');
+const { addCalendarMonths } = require('./expiry');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -35,6 +36,9 @@ function versionInfo(platform, version, cfg) {
 }
 function licenseInfo(data) {
   return { licenseLabel: text(data.label, 100) || 'STB Play license', licenseExpiresAt: data.expiresAt?.toDate?.().toISOString() || null,
+    licenseStartedAt: data.activatedAt?.toDate?.().toISOString() || null,
+    licensePlanId: text(data.membershipPlanId, 120) || null, licensePlanName: text(data.membershipPlanName, 70) || null,
+    licensePortalLimit: Number.isInteger(data.portalLimit) ? data.portalLimit : null, licenseCastIncluded: data.castIncluded === true,
     licenseExpired: !!data.expiresAt && data.expiresAt.toMillis() <= Date.now() };
 }
 async function recordAppUsage(deviceId, platform, appVersion) {
@@ -64,11 +68,16 @@ exports.adminCreateKey = onCall({ region }, async request => {
   const deviceLimit = Math.max(1, Math.min(100, Number(request.data?.deviceLimit) || 1));
   const expiryInput = request.data?.expiresAt;
   const expiresAtMillis = expiryInput == null || expiryInput === '' ? null : Number(expiryInput);
+  const validityInput = request.data?.validityMonths;
+  const validityMonths = validityInput == null || validityInput === '' ? null : Number(validityInput);
   if (expiresAtMillis !== null && (!Number.isFinite(expiresAtMillis) || expiresAtMillis <= Date.now())) fail('invalid-argument', 'Expiry must be a future date and time.');
+  if (validityMonths !== null && (!Number.isInteger(validityMonths) || validityMonths < 1 || validityMonths > 120)) fail('invalid-argument', 'Validity must be between 1 and 120 months.');
+  if (expiresAtMillis !== null && validityMonths !== null) fail('invalid-argument', 'Choose either an expiry date or a first-use validity period.');
   const key = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
   await keysRef.doc(hash(key)).set({ label, keyHint: key.slice(-4), active: true, deviceLimit,
-    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis), createdAt: stamp() });
-  return { key, keyHint: key.slice(-4), deviceLimit, expiresAt: expiresAtMillis };
+    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis),
+    ...(validityMonths === null ? {} : { validityMonths, activationMode: 'firstSuccessfulRegistration' }), createdAt: stamp() });
+  return { key, keyHint: key.slice(-4), deviceLimit, expiresAt: expiresAtMillis, validityMonths };
 });
 
 exports.adminListDashboard = onCall({ region }, async request => {
@@ -91,6 +100,7 @@ exports.adminListDashboard = onCall({ region }, async request => {
     const key = d.data();
     const expiresAt = key.expiresAt?.toDate?.().toISOString() || null;
     return { id: d.id, ...key, deviceCount: count.data().count, createdAt: key.createdAt?.toDate?.().toISOString() || null,
+      activatedAt: key.activatedAt?.toDate?.().toISOString() || null,
       expiresAt, expired: !!key.expiresAt && key.expiresAt.toMillis() <= Date.now() };
   }));
   const devices = deviceSnap.docs.map(d => ({ id: d.id, keyId: d.ref.parent.parent?.id || '', ...d.data(), lastSeen: d.data().lastSeen?.toDate?.().toISOString() || null }));
@@ -155,6 +165,16 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
         if (!deviceDoc.exists) {
           const active = await tx.get(keyRef.collection('devices').where('active', '==', true));
           if (active.size >= (keyDoc.data().deviceLimit || 1)) return { status: 409, body: { error: 'Registration key device limit reached.' } };
+        }
+        const keyData = keyDoc.data();
+        const validityMonths = keyData.validityMonths;
+        if (!keyData.activatedAt && !keyData.expiresAt && keyData.activationMode === 'firstSuccessfulRegistration') {
+          const activatedAt = admin.firestore.Timestamp.fromMillis(Date.now());
+          const activation = { activatedAt };
+          if (Number.isInteger(validityMonths) && validityMonths >= 1 && validityMonths <= 120) {
+            activation.expiresAt = admin.firestore.Timestamp.fromMillis(addCalendarMonths(activatedAt.toMillis(), validityMonths));
+          }
+          tx.update(keyRef, activation);
         }
         tx.set(deviceRef, { platform, appVersion, portalHost: safeHost(req.body?.portalHost), registeredAt: deviceDoc.exists ? deviceDoc.data().registeredAt : stamp(), lastSeen: stamp(), deleteAt: deviceDeleteAt(), active: true }, { merge: true });
         return { status: 200, body: { registered: true } };

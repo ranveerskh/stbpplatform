@@ -1,0 +1,18 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/catalog"
+  to = "/.netlify/functions/catalog"
+  status = 200
+
+[[redirects]]
+  from = "/api/admin/*"
+  to = "/.netlify/functions/admin-:splat"
+  status = 200
+

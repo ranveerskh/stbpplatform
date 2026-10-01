@@ -2,6 +2,9 @@
   "name": "stbpplatform-functions",
   "private": true,
   "main": "index.js",
+  "scripts": {
+    "test": "node --test ../test/expiry.test.js"
+  },
   "engines": {
     "node": "22"
   },
