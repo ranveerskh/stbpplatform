@@ -5,6 +5,8 @@ const { createHash, randomBytes } = require('node:crypto');
 
 admin.initializeApp();
 const db = admin.firestore();
+const partnerFunctions = require('./partner-functions');
+Object.assign(exports, partnerFunctions.callables);
 const region = 'northamerica-northeast1';
 const settingsRef = db.collection('platform').doc('settings');
 const keysRef = db.collection('registrationKeys');
@@ -55,7 +57,7 @@ async function readSettings() {
 async function requireAdmin(request) {
   if (!request.auth?.uid) fail('unauthenticated', 'Sign in to continue.');
   const snap = await db.collection('admins').doc(request.auth.uid).get();
-  if (!snap.exists || snap.data().active === false) fail('permission-denied', 'Admin access is required.');
+  if (!snap.exists || snap.data().active !== true || snap.data().role !== 'admin') fail('permission-denied', 'Admin access is required.');
 }
 
 exports.adminCreateKey = onCall({ region }, async request => {
@@ -132,6 +134,10 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
   res.set('Cache-Control', 'no-store');
   try {
     const method = req.method.toUpperCase(), route = req.path.replace(/\/$/, '') || '/';
+    if (['/api/pairing/start', '/api/pairing/status', '/api/device/sync'].includes(route)) {
+      if (method !== 'POST') return res.status(405).json({ error: 'POST is required.' });
+      return partnerFunctions.handleAppApi(req, res, method, route);
+    }
     if (method === 'GET' && route === '/api/config') {
       const platform = text(req.query.platform, 20).toLowerCase(), version = text(req.query.version, 32);
       if (!['android', 'windows'].includes(platform) || !parts(version)) return res.status(400).json({ error: 'Supported platform and valid app version are required.' });
