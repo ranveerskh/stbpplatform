@@ -36,7 +36,7 @@ function addMonthsUtc(fromMillis, months) {
 
 async function getActor(uid) {
   const adminSnap = await db.collection('admins').doc(uid).get();
-  if (adminSnap.exists && adminSnap.data().active !== false && adminSnap.data().role === 'admin') {
+  if (adminSnap.exists && adminSnap.data().active !== false && (!adminSnap.data().role || adminSnap.data().role === 'admin')) {
     return { uid, role: 'admin', active: true };
   }
   const accountSnap = await accounts.doc(uid).get();

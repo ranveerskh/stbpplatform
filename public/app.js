@@ -23,6 +23,29 @@ const adjustPartnerCredits = httpsCallable(functions, 'adminAdjustPartnerCredits
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const setVisible = (id, visible) => $(id).classList.toggle('hidden', !visible);
 function friendlyError(error) { return error?.message?.replace(/^Firebase:\s*/,'') || 'Something went wrong. Please retry.'; }
+let activeAdminTab = 'keys';
+const adminViews = {
+  keys: ['keysPanel'],
+  overview: ['statsPanel', 'devicesPanel'],
+  partners: ['partnerPanel', 'partnerLimitsPanel'],
+  customers: ['adminCustomersPanel']
+};
+function showAdminTab(tab) {
+  if (!adminViews[tab]) return;
+  activeAdminTab = tab;
+  for (const [name, ids] of Object.entries(adminViews)) {
+    for (const id of ids) setVisible(id, name === tab);
+  }
+  document.querySelectorAll('[data-admin-tab]').forEach(button => {
+    const selected = button.dataset.adminTab === tab;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-current', selected ? 'page' : 'false');
+  });
+}
+document.querySelectorAll('[data-admin-tab]').forEach(button => button.addEventListener('click', () => {
+  showAdminTab(button.dataset.adminTab);
+  if (activeAdminTab === 'customers') loadAdminCustomers();
+}));
 
 async function refreshDashboard() {
   $('dashboardError').textContent = '';
@@ -34,8 +57,10 @@ async function refreshDashboard() {
   $('createPartner').classList.toggle('hidden', !canCreate);
   $('createPartner').textContent = actor.role === 'admin' ? 'Create distributor' : actor.role === 'distributor' ? 'Create reseller' : 'Create provider';
   $('adminTools').classList.toggle('hidden', actor.role !== 'admin');
+  setVisible('adminNav', actor.role === 'admin');
   setVisible('partnerPanel', actor.role !== 'provider');
   setVisible('providerPanel', actor.role === 'provider');
+  if (actor.role === 'admin') showAdminTab(activeAdminTab);
   if (actor.role === 'provider') await refreshProviderDashboard();
   if (actor.role === 'admin' && partnerData.limits) {
     for (const id of ['distributorMinCredits','distributorToResellerMax','resellerToProviderMin']) $(id).value = partnerData.limits[id];
@@ -71,7 +96,6 @@ async function refreshDashboard() {
 
   if (actor.role !== 'admin') return;
   const result = (await listDashboard()).data;
-  await refreshAdminProviderDashboard();
   $('deviceCount').textContent = result.activeDevices;
   $('keyCount').textContent = result.activeKeys;
   $('totalAppDevices').textContent = result.appUsage?.totalDevices ?? 0;
@@ -88,9 +112,16 @@ async function refreshDashboard() {
     try { await setKeyStatus({ keyId:button.dataset.key, active:button.dataset.active !== 'true' }); await refreshDashboard(); }
     catch(error) { alert(friendlyError(error)); button.disabled = false; }
   }));
+  if (activeAdminTab === 'customers') loadAdminCustomers();
 }
 
+function loadAdminCustomers() {
+  return refreshAdminProviderDashboard().catch(error => {
+    $('adminCustomerError').textContent = friendlyError(error);
+  });
+}
 async function refreshAdminProviderDashboard() {
+  $('adminCustomerError').textContent = '';
   const data = (await adminProviderDashboard()).data;
   $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
   const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
@@ -164,7 +195,7 @@ $('createPartner').addEventListener('click', async () => {
   } catch(error) { alert(friendlyError(error)); }
 });
 $('refresh').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
-$('refreshAdminCustomers').addEventListener('click', () => refreshAdminProviderDashboard().catch(e => alert(friendlyError(e))));
+$('refreshAdminCustomers').addEventListener('click', loadAdminCustomers);
 $('newKey').addEventListener('click', async () => {
   const answer = prompt('Key label (optional):'); if (answer === null) return;
   const limit = Number(prompt('Maximum devices for this key?', '1') || 1);
