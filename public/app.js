@@ -18,6 +18,7 @@ const createPortalProfile = httpsCallable(functions, 'partnerCreatePortalProfile
 const updatePortalProfile = httpsCallable(functions, 'partnerUpdatePortalProfile');
 const completePairing = httpsCallable(functions, 'partnerCompletePairing');
 const renewDeviceLicense = httpsCallable(functions, 'partnerRenewDeviceLicense');
+const adminProviderDashboard = httpsCallable(functions, 'adminProviderDashboard');
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const setVisible = (id, visible) => $(id).classList.toggle('hidden', !visible);
 function friendlyError(error) { return error?.message?.replace(/^Firebase:\s*/,'') || 'Something went wrong. Please retry.'; }
@@ -64,6 +65,7 @@ async function refreshDashboard() {
 
   if (actor.role !== 'admin') return;
   const result = (await listDashboard()).data;
+  await refreshAdminProviderDashboard();
   $('deviceCount').textContent = result.activeDevices;
   $('keyCount').textContent = result.activeKeys;
   $('totalAppDevices').textContent = result.appUsage?.totalDevices ?? 0;
@@ -80,6 +82,21 @@ async function refreshDashboard() {
     try { await setKeyStatus({ keyId:button.dataset.key, active:button.dataset.active !== 'true' }); await refreshDashboard(); }
     catch(error) { alert(friendlyError(error)); button.disabled = false; }
   }));
+}
+
+async function refreshAdminProviderDashboard() {
+  const data = (await adminProviderDashboard()).data;
+  $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
+  const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
+  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.providerEmail)}</small></td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · disabled'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="8">No provider-assigned customer devices yet</td></tr>';
+  $('adminCustomersBody').onclick = async event => {
+    const button = event.target.closest('[data-admin-license]'); if (!button) return;
+    const active = button.dataset.active !== 'true';
+    if (!confirm(`${active ? 'Enable' : 'Disable'} this customer app license?`)) return;
+    button.disabled = true;
+    try { await setKeyStatus({ keyId: button.dataset.adminLicense, active }); await refreshDashboard(); }
+    catch (error) { alert(friendlyError(error)); button.disabled = false; }
+  };
 }
 
 function formatDate(value) { return value ? new Date(value).toLocaleDateString() : 'Not set'; }
@@ -141,6 +158,7 @@ $('createPartner').addEventListener('click', async () => {
   } catch(error) { alert(friendlyError(error)); }
 });
 $('refresh').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
+$('refreshAdminCustomers').addEventListener('click', () => refreshAdminProviderDashboard().catch(e => alert(friendlyError(e))));
 $('newKey').addEventListener('click', async () => {
   const answer = prompt('Key label (optional):'); if (answer === null) return;
   const limit = Number(prompt('Maximum devices for this key?', '1') || 1);
