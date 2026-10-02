@@ -57,7 +57,9 @@ async function readSettings() {
 async function requireAdmin(request) {
   if (!request.auth?.uid) fail('unauthenticated', 'Sign in to continue.');
   const snap = await db.collection('admins').doc(request.auth.uid).get();
-  if (!snap.exists || snap.data().active !== true || snap.data().role !== 'admin') fail('permission-denied', 'Admin access is required.');
+  // Existing admin records predate the optional role field. Preserve their access.
+  const data = snap.data();
+  if (!snap.exists || data.active === false || (data.role && data.role !== 'admin')) fail('permission-denied', 'Admin access is required.');
 }
 
 exports.adminCreateKey = onCall({ region }, async request => {
