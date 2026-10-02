@@ -244,6 +244,52 @@ const callables = {
     return { account: { displayName: cleanText(actor.displayName, 100), email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) }, profiles, customers: licenses };
   }),
 
+  adminProviderDashboard: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
+    const assignmentSnap = await assignments.orderBy('updatedAt', 'desc').limit(500).get();
+    const rows = assignmentSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const unique = values => [...new Set(values.filter(Boolean))];
+    const profileIds = unique(rows.map(row => row.portalProfileId));
+    const providerUids = unique(rows.map(row => row.ownerUid));
+    const licenseIds = unique(rows.map(row => row.licenseId));
+    const fetchRefs = refs => refs.length ? db.getAll(...refs) : Promise.resolve([]);
+    const [profileDocs, providerDocs, licenseDocs] = await Promise.all([
+      fetchRefs(profileIds.map(id => portalProfiles.doc(id))),
+      fetchRefs(providerUids.map(uid => accounts.doc(uid))),
+      fetchRefs(licenseIds.map(id => registrationKeys.doc(id)))
+    ]);
+    const profileMap = new Map(profileDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
+    const providerMap = new Map(providerDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
+    const licenseMap = new Map(licenseDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
+    const now = Date.now();
+    const customers = rows.map(row => {
+      const profile = profileMap.get(row.portalProfileId) || {};
+      const provider = providerMap.get(row.ownerUid) || {};
+      const key = licenseMap.get(row.licenseId) || {};
+      const expiresAt = key.expiresAt?.toDate?.().getTime?.() || null;
+      const graceUntil = key.graceUntil?.toDate?.().getTime?.() || null;
+      const inGrace = !!expiresAt && expiresAt <= now && !!graceUntil && graceUntil > now;
+      const enabled = row.active === true && key.active === true;
+      let portalHost = '';
+      try { portalHost = new URL(profile.portalUrl).hostname; } catch {}
+      return {
+        customerLabel: cleanText(row.customerLabel, 100) || 'Customer device',
+        providerName: cleanText(provider.displayName, 100) || 'Provider account',
+        providerEmail: cleanText(provider.email, 254),
+        licenseId: cleanText(row.licenseId, 128), active: enabled,
+        licenseState: !key.active || row.active !== true ? 'disabled' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
+        licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        portalName: cleanText(profile.name, 100) || 'Unavailable profile', portalHost,
+        portalActive: profile.active === true,
+        portalExpiresAt: profile.expiresAt?.toDate?.().toISOString?.() || null,
+        platform: cleanText(row.platform, 20),
+        lastSyncedAt: row.lastSyncedAt?.toDate?.().toISOString?.() || null
+      };
+    });
+    return { customers, limit: 500, hasMore: assignmentSnap.size === 500 };
+  }),
+
   adminCreateDistributor: onCall({ region }, async request => {
     const actor = await requireActor(request);
     if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
