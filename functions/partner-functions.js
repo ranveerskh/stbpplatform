@@ -189,13 +189,15 @@ const callables = {
       : actor.role === 'distributor'
         ? [...await descendantsOf(actor.uid)].slice(0, 1000)
         : (await accounts.where('parentUid', '==', actor.uid).limit(500).get()).docs.map(doc => [doc.id, doc.data()]);
+    const accountNames = new Map(partnerRows.map(([uid, data]) => [uid, cleanText(data.displayName, 100)]));
     return {
       account: { uid: actor.uid, role: actor.role, displayName: cleanText(actor.displayName, 100),
         email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) },
       limits: actor.role === 'admin' ? await readLimits() : null,
       accounts: partnerRows.map(([uid, data]) => {
         return { uid, displayName: cleanText(data.displayName, 100), email: cleanText(data.email, 254),
-          role: data.role, parentUid: data.parentUid || null, credits: integer(data.credits, 0),
+          role: data.role, parentUid: data.parentUid || null,
+          parentName: data.parentUid ? accountNames.get(data.parentUid) || 'Parent account' : 'Admin', credits: integer(data.credits, 0),
           active: data.active === true, createdAt: data.createdAt?.toDate?.().toISOString?.() || null };
       })
     };
@@ -300,6 +302,28 @@ const callables = {
     const result = await inviteAccount({ email: data.email, displayName: data.displayName, role: 'distributor', parentUid: null, credits, actorUid: actor.uid });
     await auditEvent(actor.uid, 'partner_created', result.uid, { role: result.role, credits: result.credits });
     return result;
+  }),
+
+  adminAdjustPartnerCredits: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
+    const targetUid = cleanText(request.data?.targetUid, 128);
+    const delta = integer(request.data?.delta, 0);
+    if (!targetUid || !delta || Math.abs(delta) > 100000000) fail('invalid-argument', 'Enter a non-zero whole-number credit adjustment.');
+    const accountRef = accounts.doc(targetUid), ledgerRef = ledger.doc();
+    let balance;
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(accountRef);
+      if (!snap.exists || snap.data().active !== true) fail('not-found', 'Active partner account was not found.');
+      const current = integer(snap.data().credits, 0), next = current + delta;
+      if (!Number.isSafeInteger(next) || next < 0) fail('failed-precondition', 'Adjustment would make the credit balance negative or invalid.');
+      tx.update(accountRef, { credits: next, updatedAt: stamp() });
+      tx.create(ledgerRef, { type: 'admin_adjustment', fromUid: delta < 0 ? targetUid : null,
+        toUid: delta > 0 ? targetUid : null, amount: Math.abs(delta), delta, actorUid: actor.uid, createdAt: stamp() });
+      balance = next;
+    });
+    await auditEvent(actor.uid, 'partner_credits_adjusted', targetUid, { delta, balance });
+    return { updated: true, balance };
   }),
 
   partnerCreateChild: onCall({ region }, async request => {
