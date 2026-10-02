@@ -19,6 +19,7 @@ const updatePortalProfile = httpsCallable(functions, 'partnerUpdatePortalProfile
 const completePairing = httpsCallable(functions, 'partnerCompletePairing');
 const renewDeviceLicense = httpsCallable(functions, 'partnerRenewDeviceLicense');
 const adminProviderDashboard = httpsCallable(functions, 'adminProviderDashboard');
+const adjustPartnerCredits = httpsCallable(functions, 'adminAdjustPartnerCredits');
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const setVisible = (id, visible) => $(id).classList.toggle('hidden', !visible);
 function friendlyError(error) { return error?.message?.replace(/^Firebase:\s*/,'') || 'Something went wrong. Please retry.'; }
@@ -42,10 +43,11 @@ async function refreshDashboard() {
   const rows = partnerData.accounts.map(a => {
     const actions = [];
     if (['distributor','reseller'].includes(actor.role) && ((actor.role === 'distributor' && a.role === 'reseller') || (actor.role === 'reseller' && a.role === 'provider'))) actions.push(`<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(a.uid)}">Transfer</button>`);
+    if (actor.role === 'admin') actions.push(`<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(a.uid)}">Adjust credits</button>`);
     if (actor.role === 'admin' || actor.role === 'distributor') actions.push(`<button class="textButton" data-partner-action="role" data-uid="${escapeHtml(a.uid)}">Change role</button>`);
-    return `<tr><td>${escapeHtml(a.displayName)}</td><td>${escapeHtml(a.email)}</td><td>${escapeHtml(a.role)}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${actions.join(' ') || '—'}</td></tr>`;
+    return `<tr><td>${escapeHtml(a.displayName)}</td><td>${escapeHtml(a.email)}</td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || '—')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${actions.join(' ') || '—'}</td></tr>`;
   });
-  $('accountsBody').innerHTML = rows.join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
+  $('accountsBody').innerHTML = rows.join('') || '<tr><td colspan="7">No accounts to show</td></tr>';
   $('accountsBody').onclick = async event => {
     const button = event.target.closest('[data-partner-action]'); if (!button) return;
     const account = partnerData.accounts.find(a => a.uid === button.dataset.uid); if (!account) return;
@@ -53,6 +55,10 @@ async function refreshDashboard() {
       if (button.dataset.partnerAction === 'transfer') {
         const amount = Number(prompt(`Credits to transfer to ${account.displayName}:`, actor.role === 'reseller' ? '20' : '')); if (!Number.isSafeInteger(amount) || amount < 1) return;
         await transferCredits({ targetUid: account.uid, amount });
+      } else if (button.dataset.partnerAction === 'adjust' && actor.role === 'admin') {
+        const delta = Number(prompt(`Credit adjustment for ${account.displayName}. Use a positive number to add or a negative number to remove:`, '500'));
+        if (!Number.isSafeInteger(delta) || delta === 0) return;
+        await adjustPartnerCredits({ targetUid: account.uid, delta });
       } else {
         const newRole = prompt(`New role for ${account.displayName} (distributor, reseller, provider):`, account.role)?.trim().toLowerCase(); if (!newRole) return;
         const parentInput = newRole === 'distributor' ? '' : prompt('Parent account UID (leave blank to keep current parent):', account.parentUid || '');
