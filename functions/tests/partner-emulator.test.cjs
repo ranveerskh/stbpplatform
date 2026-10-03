@@ -152,6 +152,10 @@ async function test() {
   let providerKey = (await providerKeyRef.get()).data();
   assert.equal(providerKey.durationMonths, 12);
   assert.equal(providerKey.graceUntil.toMillis(), providerKey.expiresAt.toMillis() + 7 * 24 * 60 * 60 * 1000);
+  const providerWorkspace = await invoke('partnerProviderDashboard', provider.token);
+  assert.equal(providerWorkspace.customers.length, 1);
+  assert.equal(providerWorkspace.customers[0].keyHint, providerKey.keyHint);
+  assert.equal(providerWorkspace.customers[0].durationYears, 1);
 
   const balancesAfterOneYearActivation = await Promise.all([distributor.uid, reseller.uid, provider.uid].map(account));
   assertSame(balancesAfterOneYearActivation[0].credits, 480, 'Distributor retains 480 after allocating 20 credits.');
@@ -163,6 +167,9 @@ async function test() {
   assert(ledgerRows.some(row => row.type === 'license_issued' && row.fromUid === provider.uid && row.toUid === providerPairing.deviceHash && row.amount === 1 && row.durationYears === 1));
 
   const dashboard = await invoke('partnerListDashboard', adminUser.token);
+  assert.deepEqual(dashboard.creditSummary, {
+    allocated: 500, adjustmentNet: 0, used: 1, transferred: 40, held: 499, reconciliation: 0
+  }, 'Admin credit overview reconciles issued credits, license use, transfers, and current partner balances.');
   const resellerRow = dashboard.accounts.find(row => row.uid === reseller.uid);
   const providerRow = dashboard.accounts.find(row => row.uid === provider.uid);
   assert.equal(resellerRow.createdByName, distributor.name);

@@ -1,6 +1,6 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { FieldValue, Timestamp, AggregateField } = require('firebase-admin/firestore');
 const { createHash, randomBytes } = require('node:crypto');
 
 const db = admin.firestore();
@@ -216,10 +216,25 @@ const callables = {
     recentActivity.forEach(item => {
       if (item.toUid && deviceNames.has(item.toUid)) item.toName = deviceNames.get(item.toUid);
     });
+    let creditSummary = null;
+    if (actor.role === 'admin') {
+      const sum = async query => (await query.aggregate({ total: AggregateField.sum('amount') }).get()).data().total || 0;
+      const [allocated, used, transferred, held, signedAdjustment] = await Promise.all([
+        sum(ledger.where('type', '==', 'admin_allocation')),
+        sum(ledger.where('type', 'in', ['license_issued', 'license_renewal'])),
+        sum(ledger.where('type', '==', 'transfer')),
+        (await accounts.aggregate({ total: AggregateField.sum('credits') }).get()).data().total || 0,
+        (await ledger.where('type', '==', 'admin_adjustment').aggregate({ total: AggregateField.sum('delta') }).get()).data().total || 0
+      ]);
+      // Adjustments can add or remove credits, so reconcile using their signed delta.
+      creditSummary = { allocated, adjustmentNet: signedAdjustment, used, transferred, held,
+        reconciliation: allocated + signedAdjustment - used - held };
+    }
     return {
       account: { uid: actor.uid, role: actor.role, displayName: cleanText(actor.displayName, 100),
         email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) },
       limits: actor.role === 'admin' ? await readLimits() : null,
+      creditSummary,
       recentActivity,
       accounts: partnerRows.map(([uid, data]) => {
         return { uid, displayName: cleanText(data.displayName, 100), email: cleanText(data.email, 254),
@@ -256,6 +271,10 @@ const callables = {
       return {
         deviceRef: doc.id,
         deviceId: doc.id,
+        licenseId: cleanText(assignment.licenseId, 128),
+        keyHint: cleanText(key.keyHint, 4),
+        createdByName: cleanText(key.createdByName, 100) || cleanText(actor.displayName, 100) || 'You',
+        durationYears: Math.max(1, Math.round(integer(key.durationMonths, 12) / 12)),
         portalMac: cleanText(assignment.portalMac, 17).toUpperCase(),
         customerLabel: cleanText(assignment.customerLabel, 100) || 'Customer device',
         platform: cleanText(assignment.platform, 20), active: assignment.active === true && key.active === true,
@@ -638,7 +657,7 @@ async function completePairing(request) {
       licenseId = keyRef.id;
       tx.update(providerRef, { credits: balance - durationYears, updatedAt: stamp() });
       tx.create(ledgerRef, { type: 'license_issued', fromUid: actor.uid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
-      tx.create(keyRef, { label, active: true, deviceLimit: 1, ownerUid: actor.uid, ownerRole: actor.role, durationMonths: durationYears * 12,
+      tx.create(keyRef, { label, keyHint: licenseKey.slice(-4), active: true, deviceLimit: 1, ownerUid: actor.uid, ownerRole: actor.role, durationMonths: durationYears * 12,
         activatedAt: Timestamp.fromMillis(activatedAtMillis), expiresAt, graceUntil,
         createdAt: stamp(), createdBy: actor.uid, createdByName: cleanText(actor.displayName, 100) || cleanText(actor.email, 254),
         createdByEmail: cleanText(actor.email, 254), portalProfileId: profileId });
