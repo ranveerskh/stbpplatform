@@ -107,12 +107,39 @@ exports.adminListDashboard = onCall({ region }, async request => {
     platformCounts: { android: androidAppDevicesSnap.data().count, windows: windowsAppDevicesSnap.data().count }, settings };
 });
 
+exports.adminArchiveKey = onCall({ region }, async request => {
+  await requireAdmin(request);
+  const keyId = text(request.data?.keyId, 64), archived = request.data?.archived === true;
+  if (!/^[a-f0-9]{64}$/.test(keyId)) fail('invalid-argument', 'Invalid key reference.');
+  const ref = keysRef.doc(keyId);
+  let previousActive = false;
+  await db.runTransaction(async tx => {
+    const [keySnap, devices] = await Promise.all([tx.get(ref), tx.get(ref.collection('devices'))]);
+    if (!keySnap.exists) fail('not-found', 'Registration key was not found.');
+    const key = keySnap.data();
+    if (key.ownerUid) fail('failed-precondition', 'Customer licenses are archived from the Customers tab so their assignment and history stay together.');
+    if (key.archived === archived) return;
+    if (archived && !devices.empty) fail('failed-precondition', 'This key has device assignments. Disable it instead; assigned key history cannot be archived as an unused demo key.');
+    if (archived) {
+      previousActive = key.active === true;
+      tx.update(ref, { active: false, archived: true, archivedWasActive: previousActive, archivedAt: stamp(), archivedBy: request.auth.uid });
+    } else {
+      previousActive = key.archivedWasActive === true;
+      tx.update(ref, { active: previousActive, archived: false, archivedWasActive: FieldValue.delete(), archivedAt: FieldValue.delete(), archivedBy: FieldValue.delete() });
+    }
+  });
+  await db.collection('platformAudit').add({ actorUid: request.auth.uid, type: archived ? 'registration_key_archived' : 'registration_key_restored', targetUid: keyId, createdAt: stamp() });
+  return { updated: true, archived };
+});
+
 exports.adminSetKeyStatus = onCall({ region }, async request => {
   await requireAdmin(request);
   const keyId = text(request.data?.keyId, 64);
   if (!/^[a-f0-9]{64}$/.test(keyId)) fail('invalid-argument', 'Invalid key reference.');
   const ref = keysRef.doc(keyId), active = request.data?.active === true;
-  if (!(await ref.get()).exists) fail('not-found', 'Registration key not found.');
+  const keySnap = await ref.get();
+  if (!keySnap.exists) fail('not-found', 'Registration key not found.');
+  if (keySnap.data().archived === true) fail('failed-precondition', 'Restore this key before changing its active status.');
   await ref.update({ active });
   const devices = await ref.collection('devices').get();
   const batch = db.batch(); devices.docs.forEach(d => batch.update(d.ref, { active }));
