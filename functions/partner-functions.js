@@ -244,7 +244,7 @@ const callables = {
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
         licenseState: !keySnap.exists || key.active !== true ? 'disabled' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
-        portalName: cleanText(profile?.name, 100) || 'Unavailable profile',
+        portalName: cleanText(profile?.name, 100) || 'Unavailable profile', portalProfileId: cleanText(assignment.portalProfileId, 128),
         portalExpiresAt: profile?.expiresAt?.toDate?.().toISOString?.() || null,
         portalActive: profile?.active === true,
         lastSyncedAt: assignment.lastSyncedAt?.toDate?.().toISOString?.() || null
@@ -475,6 +475,27 @@ const callables = {
       expiresAt: expiryMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiryMillis), updatedAt: stamp(), updatedBy: actor.uid });
     await auditEvent(actor.uid, 'portal_profile_updated', profileId, { revision });
     return { updated: true, revision, affectedDevicesUpdatedOnNextSync: true };
+  }),
+
+  partnerSwitchDevicePortal: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
+    const deviceHash = cleanText(request.data?.deviceRef, 128);
+    const profileId = cleanText(request.data?.profileId, 128);
+    if (!/^[a-f0-9]{64}$/.test(deviceHash) || !profileId) fail('invalid-argument', 'Choose a customer device and portal.');
+    const assignmentRef = assignments.doc(deviceHash), profileRef = portalProfiles.doc(profileId);
+    await db.runTransaction(async tx => {
+      const [assignmentSnap, profileSnap] = await Promise.all([tx.get(assignmentRef), tx.get(profileRef)]);
+      if (!assignmentSnap.exists || assignmentSnap.data().active !== true || assignmentSnap.data().ownerUid !== actor.uid) {
+        fail('permission-denied', 'You can switch portals only for customer devices assigned by your account.');
+      }
+      if (!profileSnap.exists || profileSnap.data().active !== true || profileSnap.data().ownerUid !== actor.uid) {
+        fail('permission-denied', 'Choose an active portal profile owned by your account.');
+      }
+      tx.update(assignmentRef, { portalProfileId: profileId, updatedAt: stamp(), portalChangedAt: stamp(), portalChangedBy: actor.uid });
+    });
+    await auditEvent(actor.uid, 'device_portal_switched', deviceHash, { profileId });
+    return { updated: true, takesEffectOnNextDeviceSync: true };
   }),
 
   partnerRenewDeviceLicense: onCall({ region }, async request => {
