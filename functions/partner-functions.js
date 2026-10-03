@@ -190,28 +190,41 @@ const callables = {
         ? [...await descendantsOf(actor.uid)].slice(0, 1000)
         : (await accounts.where('parentUid', '==', actor.uid).limit(500).get()).docs.map(doc => [doc.id, doc.data()]);
     const accountNames = new Map(partnerRows.map(([uid, data]) => [uid, cleanText(data.displayName, 100)]));
+    accountNames.set(actor.uid, actor.role === 'admin' ? 'Admin' : cleanText(actor.displayName, 100) || 'You');
+    const recentLedgerSnap = await ledger.orderBy('createdAt', 'desc').limit(100).get();
+    const visibleUids = new Set([actor.uid, ...partnerRows.map(([uid]) => uid)]);
+    const recentActivity = recentLedgerSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(item => actor.role === 'admin' || visibleUids.has(item.fromUid) || visibleUids.has(item.toUid))
+      .slice(0, 60).map(item => ({ type: cleanText(item.type, 40), amount: integer(item.amount, 0), durationYears: integer(item.durationYears, 0),
+        fromUid: item.fromUid || null, toUid: item.toUid || null, actorUid: item.actorUid || null, fromName: item.fromUid ? accountNames.get(item.fromUid) || 'Partner account' : 'Admin',
+        toName: item.toUid ? accountNames.get(item.toUid) || 'Customer device' : '—',
+        actorName: accountNames.get(item.actorUid) || (item.actorUid ? 'Admin' : '—'),
+        createdAt: item.createdAt?.toDate?.().toISOString?.() || null }));
     return {
       account: { uid: actor.uid, role: actor.role, displayName: cleanText(actor.displayName, 100),
         email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) },
       limits: actor.role === 'admin' ? await readLimits() : null,
+      recentActivity,
       accounts: partnerRows.map(([uid, data]) => {
         return { uid, displayName: cleanText(data.displayName, 100), email: cleanText(data.email, 254),
           role: data.role, parentUid: data.parentUid || null,
           parentName: data.parentUid ? accountNames.get(data.parentUid) || 'Parent account' : 'Admin', credits: integer(data.credits, 0),
-          active: data.active === true, createdAt: data.createdAt?.toDate?.().toISOString?.() || null };
+          active: data.active === true, createdAt: data.createdAt?.toDate?.().toISOString?.() || null, createdByUid: data.createdBy || null,
+          createdByName: data.createdBy ? (accountNames.get(data.createdBy) || (data.createdBy === actor.uid ? cleanText(actor.displayName, 100) : 'Admin')) : '—',
+          roleUpdatedAt: data.roleUpdatedAt?.toDate?.().toISOString?.() || null };
       })
     };
   }),
 
   partnerProviderDashboard: onCall({ region }, async request => {
     const actor = await requireActor(request);
-    if (actor.role !== 'provider') fail('permission-denied', 'Provider access is required.');
+    if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
     const [profileSnap, assignmentSnap] = await Promise.all([
       portalProfiles.where('ownerUid', '==', actor.uid).limit(250).get(),
       assignments.where('ownerUid', '==', actor.uid).limit(500).get()
     ]);
     const profileById = new Map(profileSnap.docs.map(doc => [doc.id, doc.data()]));
-    const licenses = await Promise.all(assignmentSnap.docs.map(async doc => {
+  const licenses = await Promise.all(assignmentSnap.docs.map(async doc => {
       const assignment = doc.data();
       const [keySnap, profile] = await Promise.all([
         registrationKeys.doc(assignment.licenseId).get(),
@@ -263,13 +276,16 @@ const callables = {
       fetchRefs(providerUids.map(uid => accounts.doc(uid))),
       fetchRefs(licenseIds.map(id => registrationKeys.doc(id)))
     ]);
+    const parentUids = unique(providerDocs.filter(doc => doc.exists).map(doc => doc.data().parentUid));
+    const parentDocs = await fetchRefs(parentUids.map(uid => accounts.doc(uid)));
     const profileMap = new Map(profileDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
-    const providerMap = new Map(providerDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
+    const providerMap = new Map([...providerDocs, ...parentDocs].filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
     const licenseMap = new Map(licenseDocs.filter(doc => doc.exists).map(doc => [doc.id, doc.data()]));
     const now = Date.now();
     const customers = rows.map(row => {
       const profile = profileMap.get(row.portalProfileId) || {};
       const provider = providerMap.get(row.ownerUid) || {};
+      const parent = provider.parentUid ? (providerMap.get(provider.parentUid) || {}) : {}; 
       const key = licenseMap.get(row.licenseId) || {};
       const expiresAt = key.expiresAt?.toDate?.().getTime?.() || null;
       const graceUntil = key.graceUntil?.toDate?.().getTime?.() || null;
@@ -281,8 +297,10 @@ const callables = {
         customerLabel: cleanText(row.customerLabel, 100) || 'Customer device',
         deviceId: row.id,
         portalMac: cleanText(row.portalMac, 17).toUpperCase(),
-        providerName: cleanText(provider.displayName, 100) || 'Provider account',
-        providerEmail: cleanText(provider.email, 254),
+        providerName: cleanText(provider.displayName, 100) || 'Partner account',
+        providerEmail: cleanText(provider.email, 254), partnerRole: cleanText(provider.role, 30),
+        parentName: cleanText(parent.displayName, 100) || (provider.parentUid ? 'Parent account' : 'Admin'),
+        createdBy: cleanText(key.createdBy, 128) || cleanText(row.ownerUid, 128),
         licenseId: cleanText(row.licenseId, 128), active: enabled,
         licenseState: !key.active || row.active !== true ? 'disabled' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
@@ -431,7 +449,7 @@ const callables = {
 
   partnerCreatePortalProfile: onCall({ region }, async request => {
     const actor = await requireActor(request);
-    if (actor.role !== 'provider') fail('permission-denied', 'Only Providers can create portal profiles.');
+    if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
     const name = cleanText(request.data?.name, 100), portalUrl = validatePortalUrl(request.data?.portalUrl);
     if (!name) fail('invalid-argument', 'Enter a portal profile name.');
     const expiryMillis = request.data?.expiresAt == null || request.data?.expiresAt === '' ? null : Number(request.data.expiresAt);
@@ -446,7 +464,7 @@ const callables = {
   partnerUpdatePortalProfile: onCall({ region }, async request => {
     const actor = await requireActor(request);
     const profileId = cleanText(request.data?.profileId, 128), name = cleanText(request.data?.name, 100);
-    if (actor.role !== 'provider' || !profileId) fail('permission-denied', 'An active Provider account and profile are required.');
+    if (!accountRoles.has(actor.role) || !profileId) fail('permission-denied', 'An active partner account and profile are required.');
     const ref = portalProfiles.doc(profileId), snap = await ref.get();
     if (!snap.exists || snap.data().ownerUid !== actor.uid) fail('permission-denied', 'You can edit only your own portal profiles.');
     const portalUrl = validatePortalUrl(request.data?.portalUrl);
@@ -461,7 +479,7 @@ const callables = {
 
   partnerRenewDeviceLicense: onCall({ region }, async request => {
     const actor = await requireActor(request);
-    if (actor.role !== 'provider') fail('permission-denied', 'Only Providers can renew customer licenses.');
+    if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required to renew customer licenses.');
     const deviceHash = cleanText(request.data?.deviceRef, 128);
     if (!/^[a-f0-9]{64}$/.test(deviceHash)) fail('invalid-argument', 'Choose a valid customer device.');
     const assignmentRef = assignments.doc(deviceHash);
@@ -478,16 +496,19 @@ const callables = {
         fail('failed-precondition', 'Provider or customer device is no longer active. Refresh and retry.');
       }
       if (!keySnap.exists || keySnap.data().active !== true) fail('failed-precondition', 'This customer license is disabled and cannot be renewed.');
+      const years = integer(request.data?.years, 1);
+      if (years < 1 || years > 10) fail('invalid-argument', 'Choose a license term from 1 to 10 years.');
       const balance = integer(providerSnap.data().credits, 0);
-      if (balance < 1) fail('failed-precondition', 'You need 1 credit to renew this license.');
+      if (balance < years) fail('failed-precondition', `You need ${years} credits to renew this license for ${years} year${years === 1 ? '' : 's'}.`);
       const now = Date.now(), oldExpiry = keySnap.data().expiresAt?.toDate?.().getTime?.() || 0;
-      const start = Math.max(now, oldExpiry), expiresAtMillis = addMonthsUtc(start, 12);
+      const start = Math.max(now, oldExpiry), expiresAtMillis = addMonthsUtc(start, years * 12);
       const graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
-      tx.update(accounts.doc(actor.uid), { credits: balance - 1, updatedAt: stamp() });
+      tx.update(accounts.doc(actor.uid), { credits: balance - years, updatedAt: stamp() });
       tx.update(keyRef, { expiresAt: admin.firestore.Timestamp.fromMillis(expiresAtMillis),
         graceUntil: admin.firestore.Timestamp.fromMillis(graceUntilMillis), renewedAt: stamp(), renewedBy: actor.uid });
-      tx.create(ledgerRef, { type: 'license_renewal', fromUid: actor.uid, toUid: deviceHash, amount: 1, actorUid: actor.uid, createdAt: stamp() });
-      renewal = { expiresAt: new Date(expiresAtMillis).toISOString(), graceUntil: new Date(graceUntilMillis).toISOString(), remainingCredits: balance - 1 };
+      tx.create(ledgerRef, { type: 'license_renewal', fromUid: actor.uid, toUid: deviceHash, amount: years, durationYears: years, actorUid: actor.uid, createdAt: stamp() });
+      tx.update(keyRef, { durationMonths: integer(keySnap.data().durationMonths, 12) + years * 12 });
+      renewal = { expiresAt: new Date(expiresAtMillis).toISOString(), graceUntil: new Date(graceUntilMillis).toISOString(), remainingCredits: balance - years, durationYears: years };
     });
     await auditEvent(actor.uid, 'device_license_renewed', assignment.licenseId, { deviceHash });
     return { renewed: true, ...renewal };
@@ -517,10 +538,12 @@ async function beginPairing(req, res) {
 
 async function completePairing(request) {
   const actor = await requireActor(request);
-  if (actor.role !== 'provider') fail('permission-denied', 'Only a Provider can pair a customer device.');
+  if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required to pair customer devices.');
   const code = cleanText(request.data?.pairingCode, 20).toUpperCase();
   const profileId = cleanText(request.data?.profileId, 128);
   const label = cleanText(request.data?.customerLabel, 100) || 'Customer device';
+  const durationYears = integer(request.data?.durationYears, 1);
+  if (durationYears < 1 || durationYears > 10) fail('invalid-argument', 'Choose a license term from 1 to 10 years.');
   if (!/^[A-F0-9]{12}$/.test(code) || !profileId) fail('invalid-argument', 'Enter the pairing code and select a portal profile.');
   const codeRef = pairingCodes.doc(sha256(code)), profileRef = portalProfiles.doc(profileId), providerRef = accounts.doc(actor.uid);
   const licenseKey = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
@@ -549,22 +572,22 @@ async function completePairing(request) {
       result = { existingLicense: true };
     } else {
       const balance = integer(provider.credits, 0);
-      if (balance < 1) fail('failed-precondition', 'You need at least 1 credit to activate a customer device.');
-      const activatedAtMillis = Date.now(), expiresAtMillis = addMonthsUtc(activatedAtMillis, 12), graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
+      if (balance < durationYears) fail('failed-precondition', `You need ${durationYears} credits to activate this device for ${durationYears} year${durationYears === 1 ? '' : 's'}.`);
+      const activatedAtMillis = Date.now(), expiresAtMillis = addMonthsUtc(activatedAtMillis, durationYears * 12), graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
       expiresAt = admin.firestore.Timestamp.fromMillis(expiresAtMillis);
       graceUntil = admin.firestore.Timestamp.fromMillis(graceUntilMillis);
       licenseId = keyRef.id;
-      tx.update(providerRef, { credits: balance - 1, updatedAt: stamp() });
-      tx.create(ledgerRef, { type: 'license_issued', fromUid: actor.uid, toUid: pairing.deviceHash, amount: 1, actorUid: actor.uid, createdAt: stamp() });
-      tx.create(keyRef, { label, active: true, deviceLimit: 1, ownerUid: actor.uid, durationMonths: 12,
+      tx.update(providerRef, { credits: balance - durationYears, updatedAt: stamp() });
+      tx.create(ledgerRef, { type: 'license_issued', fromUid: actor.uid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
+      tx.create(keyRef, { label, active: true, deviceLimit: 1, ownerUid: actor.uid, durationMonths: durationYears * 12,
         activatedAt: admin.firestore.Timestamp.fromMillis(activatedAtMillis), expiresAt, graceUntil,
-        createdAt: stamp(), createdBy: actor.uid, portalProfileId: profileId });
+        createdAt: stamp(), createdBy: actor.uid, ownerRole: actor.role, portalProfileId: profileId });
       tx.create(assignmentRef, { deviceHash: pairing.deviceHash, licenseId, ownerUid: actor.uid, portalProfileId: profileId,
         deviceTokenHash: pairing.deviceTokenHash, platform: pairing.platform, portalMac: portalMac || null, customerLabel: label,
         providerName: cleanText(provider.displayName, 100), active: true, createdAt: stamp(), updatedAt: stamp(), lastSyncedAt: stamp() });
       tx.create(keyRef.collection('devices').doc(pairing.deviceHash), { active: true, platform: pairing.platform,
         registeredAt: stamp(), lastSeen: stamp(), deleteAt: admin.firestore.Timestamp.fromMillis(graceUntilMillis) });
-      result = { existingLicense: false, remainingCredits: balance - 1 };
+      result = { existingLicense: false, remainingCredits: balance - durationYears, durationYears };
     }
     tx.update(codeRef, { state: 'completed', providerUid: actor.uid, profileId, assignmentId: pairing.deviceHash,
       licenseId, completedAt: stamp() });
@@ -593,7 +616,6 @@ async function getPairingStatus(req, res) {
   if (!keySnap.exists || !profileSnap.exists || profileSnap.data().active !== true) return res.status(403).json({ error: 'License or portal assignment is unavailable.' });
   return res.status(200).json({ state: 'completed', ...publicAssignment(keySnap.data(), profileSnap.data()) });
 }
-
 
 async function cancelPairing(req, res) {
   const deviceId = cleanText(req.body?.deviceId, 128), code = cleanText(req.body?.pairingCode, 20).toUpperCase();
