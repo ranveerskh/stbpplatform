@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "deploy": "firebase deploy --only firestore:rules,firestore:indexes,functions",
-    "emulators": "firebase emulators:start --only functions,firestore,auth"
+    "emulators": "firebase emulators:start --only functions,firestore,auth",
+    "test:emulator": "firebase emulators:exec --project demo-stbpplatform --only auth,firestore,functions \"node functions/tests/partner-emulator.test.cjs\""
   },
   "devDependencies": {
     "firebase-tools": "^14.0.0"

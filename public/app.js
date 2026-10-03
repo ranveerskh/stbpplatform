@@ -25,6 +25,20 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':
 const setVisible = (id, visible) => $(id).classList.toggle('hidden', !visible);
 function friendlyError(error) { return error?.message?.replace(/^Firebase:\s*/,'') || 'Something went wrong. Please retry.'; }
 let activeAdminTab = 'keys';
+let currentPartnerData = null;
+let currentPartnerActor = null;
+let transferTarget = null;
+let editingProfile = null;
+const licenseYearOptions = (selected = 1) => Array.from({ length: 10 }, (_, index) => index + 1)
+  .map(years => `<option value="${years}" ${years === selected ? 'selected' : ''}>${years} year${years === 1 ? '' : 's'} · ${years} credit${years === 1 ? '' : 's'}</option>`).join('');
+function formatDateTime(value) { return value ? new Date(value).toLocaleString() : 'Not set'; }
+function localDateTimeValue(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function openDialog(id) { $(id).showModal(); }
+function closeDialog(id) { $(id).close(); }
 const adminViews = {
   keys: ['keysPanel'],
   overview: ['statsPanel', 'devicesPanel'],
@@ -52,6 +66,8 @@ async function refreshDashboard() {
   $('dashboardError').textContent = '';
   const partnerData = (await listPartnerDashboard()).data;
   const actor = partnerData.account;
+  currentPartnerData = partnerData;
+  currentPartnerActor = actor;
   $('accountHeading').textContent = actor.role === 'admin' ? 'All partner accounts' : 'Your accounts';
   $('accountSummary').textContent = `${actor.displayName || actor.email || actor.role} · ${actor.role} · ${actor.credits ?? 0} credits`;
   const canCreate = ['admin','distributor','reseller'].includes(actor.role);
@@ -71,7 +87,7 @@ async function refreshDashboard() {
   const parentChoices = (role, excludeUid = '') => {
     if (role === 'distributor') return [{ uid:'', displayName:'Admin', role:'admin' }];
     const required = role === 'reseller' ? 'distributor' : 'reseller';
-    const candidates = allAccounts.filter(item => item.uid !== excludeUid && item.role === required && (actor.role === 'admin' || item.parentUid === actor.uid || item.uid === actor.uid));
+    const candidates = allAccounts.filter(item => item.uid !== excludeUid && item.active && item.role === required && (actor.role === 'admin' || item.parentUid === actor.uid || item.uid === actor.uid));
     if (actor.role === required && !candidates.some(item => item.uid === actor.uid)) candidates.unshift({ uid:actor.uid, displayName:actor.displayName || actor.email, role:actor.role });
     return candidates;
   };
@@ -84,9 +100,13 @@ async function refreshDashboard() {
   };
   const details = account => {
     const events = (partnerData.recentActivity || []).filter(item => item.fromUid === account.uid || item.toUid === account.uid || item.actorUid === account.uid).slice(0, 8);
-    const activity = events.map(item => `<li>${escapeHtml(activityLabel(item.type))} · ${item.amount} credit${item.amount === 1 ? '' : 's'} · ${escapeHtml(item.fromName)} → ${escapeHtml(item.toName)} <small>${escapeHtml(formatDate(item.createdAt))}</small></li>`).join('') || '<li>No recent account activity.</li>';
-    return `<details class="accountDetails"><summary>Details & activity</summary><div class="detailGrid"><span>Email</span><b>${escapeHtml(account.email)}</b><span>Parent</span><b>${escapeHtml(account.parentName || 'Admin')}</b><span>Created by</span><b>${escapeHtml(account.createdByName || '—')}</b><span>Created</span><b>${escapeHtml(formatDate(account.createdAt))}</b><span>Account ID</span><code>${escapeHtml(account.uid)}</code></div><ul class="activityList">${activity}</ul></details>`;
+    const activity = events.map(item => `<li>${escapeHtml(activityLabel(item.type))}${item.durationYears ? ` · ${item.durationYears} year${item.durationYears === 1 ? '' : 's'}` : ''} · ${item.amount} credit${item.amount === 1 ? '' : 's'} · ${escapeHtml(item.fromName)} → ${escapeHtml(item.toName)} <small>${escapeHtml(formatDateTime(item.createdAt))}</small></li>`).join('') || '<li>No recent account activity.</li>';
+    return `<details class="accountDetails"><summary>Account details & activity</summary><div class="detailGrid"><span>Email</span><b>${escapeHtml(account.email || '—')}</b><span>Parent</span><b>${escapeHtml(account.parentName || 'Admin')}${account.parentUid ? ` · ${escapeHtml(account.parentUid)}` : ''}</b><span>Created by</span><b>${escapeHtml(account.createdByName || '—')}</b><span>Creator role</span><b>${escapeHtml(account.createdByRole || '—')}</b><span>Creator email</span><b>${escapeHtml(account.createdByEmail || '—')}</b><span>Creator ID</span><code>${escapeHtml(account.createdByUid || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(account.createdAt))}</b><span>Account ID</span><code>${escapeHtml(account.uid)}</code></div><ul class="activityList">${activity}</ul></details>`;
   };
+  const recentEvents = partnerData.recentActivity || [];
+  $('partnerActivity').innerHTML = recentEvents.map(item => `<li>${escapeHtml(activityLabel(item.type))}${item.durationYears ? ` · ${item.durationYears} year${item.durationYears === 1 ? '' : 's'}` : ''} · ${item.amount} credit${item.amount === 1 ? '' : 's'} · ${escapeHtml(item.fromName)} → ${escapeHtml(item.toName)} · by ${escapeHtml(item.actorName)} <small>${escapeHtml(formatDateTime(item.createdAt))}</small></li>`).join('');
+  setVisible('partnerActivityEmpty', recentEvents.length === 0);
+  $('partnerActivity').classList.toggle('hidden', recentEvents.length === 0);
   $('accountsBody').innerHTML = allAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
   $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span><small>Created ${escapeHtml(formatDate(a.createdAt))}</small></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
   $('accountsBody').onclick = $('accountsCards').onclick = async event => {
@@ -94,8 +114,14 @@ async function refreshDashboard() {
     const account = partnerData.accounts.find(a => a.uid === button.dataset.uid); if (!account) return;
     try {
       if (button.dataset.partnerAction === 'transfer') {
-        const amount = Number(prompt(`Credits to transfer to ${account.displayName}. Available: ${actor.credits}:`, actor.role === 'reseller' ? '20' : '')); if (!Number.isSafeInteger(amount) || amount < 1) return;
-        await transferCredits({ targetUid: account.uid, amount });
+        transferTarget = account;
+        $('creditTransferRecipient').textContent = `${account.displayName} · ${account.role}`;
+        $('creditTransferAmount').value = actor.role === 'reseller' ? '20' : '';
+        $('creditTransferAmount').max = String(actor.credits);
+        $('creditTransferAvailable').textContent = `Available balance: ${actor.credits} credits. The transfer and ledger entry are saved together.`;
+        $('creditTransferError').textContent = '';
+        openDialog('creditTransferDialog');
+        return;
       } else if (button.dataset.partnerAction === 'adjust' && actor.role === 'admin') {
         const delta = Number(prompt(`Credit adjustment for ${account.displayName}. Positive adds, negative removes.`, '')); if (!Number.isSafeInteger(delta) || delta === 0) return;
         await adjustPartnerCredits({ targetUid: account.uid, delta });
@@ -131,7 +157,7 @@ async function refreshDashboard() {
   $('active30d').textContent = result.appUsage?.active30d ?? 0;
   $('androidCount').textContent = result.platformCounts.android;
   $('windowsCount').textContent = result.platformCounts.windows;
-  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}<details class="accountDetails"><summary>Key details</summary><small>Created by: ${escapeHtml(k.createdByRole || 'Admin')}<br>${escapeHtml(k.createdBy || 'Admin')}<br>Created: ${escapeHtml(formatDate(k.createdAt))}</small></details></td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${k.expired||!k.active?'off':'on'}">${k.expired?'Expired':k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
+  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}<details class="accountDetails"><summary>Key creator details</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(k.createdByName || (k.createdBy ? 'Admin (name unavailable)' : 'Unknown legacy creator'))}</b><span>Role</span><b>${escapeHtml(k.createdByRole || '—')}</b><span>Email</span><b>${escapeHtml(k.createdByEmail || '—')}</b><span>Account ID</span><code>${escapeHtml(k.createdBy || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(k.createdAt))}</b></div></details></td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${k.expired||!k.active?'off':'on'}">${k.expired?'Expired':k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
   $('devicesBody').innerHTML = result.devices.map(d => `<tr><td>${escapeHtml(d.platform)}</td><td>${escapeHtml(d.appVersion)}</td><td>${escapeHtml(d.portalHost || '—')}</td><td>${d.lastSeen ? new Date(d.lastSeen).toLocaleString() : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No registered devices yet</td></tr>';
   for (const id of ['androidMinimumVersion','windowsMinimumVersion','androidUpdateUrl','windowsUpdateUrl']) $(id).value = result.settings[id] || '';
   document.querySelectorAll('[data-key]').forEach(button => button.addEventListener('click', async () => {
@@ -152,7 +178,7 @@ async function refreshAdminProviderDashboard() {
   const data = (await adminProviderDashboard()).data;
   $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
   const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
-  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Key details</summary><small>Created by account: ${escapeHtml(customer.createdBy || customer.providerName)}<br>License ID: ${escapeHtml(customer.licenseId)}</small></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · disabled'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
+  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Key details</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Creator ID</span><code>${escapeHtml(customer.createdBy || '—')}</code><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Parent account ID</span><code>${escapeHtml(customer.parentUid || '—')}</code><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
   $('adminCustomersBody').onclick = async event => {
     const button = event.target.closest('[data-admin-license]'); if (!button) return;
     const active = button.dataset.active !== 'true';
@@ -163,53 +189,54 @@ async function refreshAdminProviderDashboard() {
   };
 }
 
-function activityLabel(type) { return ({transfer:'Credit transfer',admin_allocation:'Admin allocation',admin_adjustment:'Admin adjustment',license_issued:'Customer license activated',license_renewal:'License renewed'})[type] || type; }
+function activityLabel(type) { return ({transfer:'Credit transfer',admin_allocation:'Admin allocation',admin_adjustment:'Admin credit adjustment',license_issued:'Customer license activated',license_renewal:'License renewed'})[type] || type; }
 function customerLabelForDevice(deviceRef, customers) { return customers.find(item => item.deviceRef === deviceRef)?.customerLabel || 'customer'; }
 function formatDate(value) { return value ? new Date(value).toLocaleDateString() : 'Not set'; }
 async function refreshProviderDashboard() {
   $('providerError').textContent = '';
   const data = (await providerDashboard()).data;
   $('providerSummary').textContent = `${data.account.displayName || data.account.email} · ${data.account.credits} credits`;
-  const profileOptions = data.profiles.filter(profile => profile.active).map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)} · ${escapeHtml(profile.host)}</option>`).join('');
+  const activeProfiles = data.profiles.filter(profile => profile.active);
+  const profileOptions = activeProfiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)} · ${escapeHtml(profile.host)}</option>`).join('');
   $('pairingProfile').innerHTML = profileOptions || '<option value="">Create an active portal profile first</option>';
   $('pairingProfile').disabled = !profileOptions;
-  $('profilesList').innerHTML = data.profiles.map(profile => `<article class="profileItem"><div><b>${escapeHtml(profile.name)}</b><small>${escapeHtml(profile.host || 'Host unavailable')} · expires ${escapeHtml(formatDate(profile.expiresAt))} · revision ${profile.revision}</small></div><button class="textButton" data-profile-edit="${escapeHtml(profile.id)}">Edit</button></article>`).join('') || '<p class="muted">No portal profiles yet.</p>';
+  $('profilesList').innerHTML = data.profiles.map(profile => `<article class="profileItem"><div><b>${escapeHtml(profile.name)}</b><small>${escapeHtml(profile.host || 'Host unavailable')} · ${profile.active ? 'Active' : profile.expired ? 'Expired' : 'Inactive'} · expires ${escapeHtml(formatDate(profile.expiresAt))} · revision ${profile.revision}</small></div><button class="textButton" data-profile-edit="${escapeHtml(profile.id)}">Edit</button></article>`).join('') || '<p class="muted">No portal profiles yet.</p>';
   $('profilesList').onclick = async event => {
     const button = event.target.closest('[data-profile-edit]'); if (!button) return;
     const profile = data.profiles.find(item => item.id === button.dataset.profileEdit); if (!profile) return;
-    const portalUrl = prompt('Enter the updated authorized portal URL:', ''); if (portalUrl === null) return;
-    const name = prompt('Profile name:', profile.name); if (name === null) return;
-    const expiryText = prompt('Portal expiry in local time (YYYY-MM-DDTHH:mm), or blank if not known:', profile.expiresAt ? new Date(profile.expiresAt).toISOString().slice(0,16) : '');
-    if (expiryText === null) return;
-    const expiresAt = expiryText.trim() ? new Date(expiryText).getTime() : null;
-    if (expiryText.trim() && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { alert('Enter a future portal expiry date and time.'); return; }
-    try { await updatePortalProfile({ profileId: profile.id, name: name.trim(), portalUrl: portalUrl.trim(), expiresAt }); await refreshProviderDashboard(); alert('Portal profile saved. Assigned apps receive it on their next sync.'); }
-    catch (error) { alert(friendlyError(error)); }
+    editingProfile = profile;
+    $('editProfileName').value = profile.name;
+    $('editProfileUrl').value = '';
+    $('editProfileExpiry').value = localDateTimeValue(profile.expiresAt);
+    $('portalEditError').textContent = '';
+    openDialog('portalEditDialog');
   };
   const statusLabel = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
-  $('customersBody').innerHTML = data.customers.map(customer => {
-    const canRenew = customer.active && customer.licenseState !== 'disabled';
-    return `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td><select data-device-profile="${escapeHtml(customer.deviceRef)}">${data.profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === customer.portalProfileId ? 'selected' : ''} ${profile.active ? '' : 'disabled'}>${escapeHtml(profile.name)}${profile.active ? '' : ' · inactive'}</option>`).join('')}</select><button class="textButton" data-switch-portal="${escapeHtml(customer.deviceRef)}">Switch portal</button><small>Current: ${escapeHtml(customer.portalName)}${customer.portalActive ? '' : ' · disabled'}</small></td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(statusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${canRenew ? `<button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">Renew · 1 credit</button>` : '—'}</td></tr>`;
-  }).join('') || '<tr><td colspan="9">No customer devices assigned yet</td></tr>';
-  $('customersBody').onclick = async event => {
+  const portalControl = customer => `<div class="devicePortalControl"><select data-device-profile aria-label="Active portal for ${escapeHtml(customer.customerLabel)}"><option value="">Choose active portal</option>${activeProfiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === customer.portalProfileId ? 'selected' : ''}>${escapeHtml(profile.name)} · ${escapeHtml(profile.host)}</option>`).join('')}</select><button class="textButton" data-switch-portal="${escapeHtml(customer.deviceRef)}" ${activeProfiles.length ? '' : 'disabled'}>Switch portal</button><small>Current: ${escapeHtml(customer.portalName)}${customer.portalActive ? '' : ' · inactive'}</small></div>`;
+  const renewalControl = customer => customer.active && customer.licenseState !== 'disabled'
+    ? `<div class="renewControls"><select data-renew-years aria-label="Renewal term for ${escapeHtml(customer.customerLabel)}">${licenseYearOptions()}</select><button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">Renew</button></div>` : '—';
+  $('customersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${portalControl(customer)}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(statusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${renewalControl(customer)}</td></tr>`).join('') || '<tr><td colspan="9">No customer devices assigned yet</td></tr>';
+  $('customerCards').innerHTML = data.customers.map(customer => `<article class="customerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.platform || 'Device')}</small></div><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(statusLabel[customer.licenseState] || 'Unknown')}</span></div><p class="customerCardExpiry">App license until <b>${escapeHtml(formatDate(customer.licenseExpiresAt))}</b></p><div class="cardField"><span>Portal for this customer</span>${portalControl(customer)}</div><details class="accountDetails"><summary>Device details</summary><div class="detailGrid"><span>Device ID</span><code>${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b><span>License grace</span><b>${customer.licenseState === 'grace' ? `Until ${escapeHtml(formatDate(customer.graceUntil))}` : 'Seven days after expiry'}</b></div></details><div class="customerRenew">${renewalControl(customer)}</div></article>`).join('') || '<p class="muted">No customer devices assigned yet.</p>';
+  const handleCustomerAction = async event => {
     const switchButton = event.target.closest('[data-switch-portal]');
     if (switchButton) {
       const deviceRef = switchButton.dataset.switchPortal;
-      const profileId = $('customersBody').querySelector(`[data-device-profile="${CSS.escape(deviceRef)}"]`)?.value;
+      const profileId = switchButton.closest('tr, .customerCard')?.querySelector('[data-device-profile]')?.value;
       if (!profileId || profileId === data.customers.find(item => item.deviceRef === deviceRef)?.portalProfileId) return;
       switchButton.disabled = true;
-      try { await switchDevicePortal({ deviceRef, profileId }); alert('Customer portal updated. The device will receive it on its next sync.'); await refreshProviderDashboard(); }
-      catch (error) { alert(friendlyError(error)); switchButton.disabled = false; }
+      try { await switchDevicePortal({ deviceRef, profileId }); await refreshProviderDashboard(); $('providerError').textContent = 'Customer portal updated. The app receives it on its next sync.'; }
+      catch (error) { $('providerError').textContent = friendlyError(error); switchButton.disabled = false; }
       return;
     }
     const button = event.target.closest('[data-renew-device]'); if (!button) return;
-    const years = Number(prompt(`License renewal for ${customerLabelForDevice(button.dataset.renewDevice, data.customers)}: choose 1–10 years. Each year uses 1 credit. Available: ${data.account.credits}.`, '1'));
+    const years = Number(button.closest('tr, .customerCard')?.querySelector('[data-renew-years]')?.value);
     if (!Number.isSafeInteger(years) || years < 1 || years > 10) return;
-    if (!confirm(`Use ${years} credit${years === 1 ? '' : 's'} to renew for ${years} year${years === 1 ? '' : 's'}?`)) return;
+    if (!confirm(`Renew ${customerLabelForDevice(button.dataset.renewDevice, data.customers)} for ${years} year${years === 1 ? '' : 's'} using ${years} credit${years === 1 ? '' : 's'}?`)) return;
     button.disabled = true;
-    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice, years })).data; alert(`License renewed until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`); await refreshProviderDashboard(); await refreshDashboard(); }
-    catch (error) { alert(friendlyError(error)); button.disabled = false; }
+    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice, years })).data; await refreshDashboard(); $('providerError').textContent = `License renewed until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`; }
+    catch (error) { $('providerError').textContent = friendlyError(error); button.disabled = false; }
   };
+  $('customersBody').onclick = $('customerCards').onclick = handleCustomerAction;
 }
 
 $('loginForm').addEventListener('submit', async event => {
@@ -219,22 +246,70 @@ $('loginForm').addEventListener('submit', async event => {
 });
 $('logout').addEventListener('click', () => signOut(auth));
 $('refreshPartner').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
-$('createPartner').addEventListener('click', async () => {
-  const result = await listPartnerDashboard().catch(error => { alert(friendlyError(error)); return null; });
-  if (!result) return;
-  const actor = result.data.account, displayName = prompt('Account name:')?.trim(); if (!displayName) return;
-  const email = prompt('Account email:')?.trim(); if (!email) return;
-  const defaultCredits = actor.role === 'admin' ? '500' : actor.role === 'distributor' ? '20' : '20';
-  const credits = Number(prompt(`Opening credits to allocate (you have ${actor.credits}):`, defaultCredits));
-  if (!Number.isSafeInteger(credits) || credits < 0) { alert('Enter a whole number of credits.'); return; }
-  try {
-    const callable = actor.role === 'admin' ? createDistributor : createPartnerChild;
-    const payload = actor.role === 'admin' ? { displayName, email, credits } : { displayName, email, credits, role: actor.role === 'distributor' ? 'reseller' : 'provider' };
-    const created = (await callable(payload)).data;
-    $('accountResult').innerHTML = `Account created for ${escapeHtml(created.email)}. Set password using this one-time link:<br><a href="${escapeHtml(created.passwordResetLink)}" target="_blank" rel="noopener">Open password setup</a>`;
-    setVisible('accountResult', true); await refreshDashboard();
-  } catch(error) { alert(friendlyError(error)); }
+$('createPartner').addEventListener('click', () => {
+  if (!currentPartnerActor || !currentPartnerData) return;
+  const actor = currentPartnerActor, limits = currentPartnerData.limits || {};
+  const role = actor.role === 'admin' ? 'distributor' : actor.role === 'distributor' ? 'reseller' : 'provider';
+  const minimum = actor.role === 'admin' ? Number(limits.distributorMinCredits || 500) : actor.role === 'reseller' ? Number(limits.resellerToProviderMin || 20) : 0;
+  const maximum = actor.role === 'admin' ? null : actor.role === 'distributor' ? Math.min(actor.credits, Number(limits.distributorToResellerMax || 250)) : actor.credits;
+  $('partnerAccountForm').reset();
+  $('partnerAccountDialogTitle').textContent = `Create ${role}`;
+  $('partnerCredits').min = String(minimum);
+  if (maximum === null) $('partnerCredits').removeAttribute('max'); else $('partnerCredits').max = String(maximum);
+  $('partnerCredits').value = String(Math.max(minimum, Math.min(role === 'distributor' ? 500 : 20, maximum ?? Number.MAX_SAFE_INTEGER)));
+  $('partnerAccountHelp').textContent = actor.role === 'admin'
+    ? `A Distributor needs at least ${minimum} opening credits. This Admin allocation is recorded in the ledger.`
+    : `Available: ${actor.credits} credits. Opening credits are transferred from your balance in the same transaction; each credit covers one license year.`;
+  $('partnerAccountError').textContent = maximum !== null && maximum < minimum ? `You need at least ${minimum} credits available to create a ${role}.` : '';
+  $('partnerAccountForm').querySelector('[type="submit"]').disabled = maximum !== null && maximum < minimum;
+  openDialog('partnerAccountDialog');
 });
+$('partnerAccountForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const actor = currentPartnerActor, role = actor?.role === 'admin' ? 'distributor' : actor?.role === 'distributor' ? 'reseller' : 'provider';
+  const displayName = $('partnerName').value.trim(), email = $('partnerEmail').value.trim(), credits = Number($('partnerCredits').value);
+  if (!Number.isSafeInteger(credits) || credits < Number($('partnerCredits').min) || ($('partnerCredits').max && credits > Number($('partnerCredits').max))) {
+    $('partnerAccountError').textContent = 'Enter a whole number of credits within the available range.'; return;
+  }
+  const submit = $('partnerAccountForm').querySelector('[type="submit"]'); submit.disabled = true; $('partnerAccountError').textContent = '';
+  try {
+    const callable = role === 'distributor' ? createDistributor : createPartnerChild;
+    const payload = role === 'distributor' ? { displayName, email, credits } : { displayName, email, credits, role };
+    const created = (await callable(payload)).data;
+    $('accountResult').innerHTML = `Account created for ${escapeHtml(created.email)}. Set the password using this one-time link:<br><a href="${escapeHtml(created.passwordResetLink)}" target="_blank" rel="noopener">Open password setup</a>`;
+    setVisible('accountResult', true); closeDialog('partnerAccountDialog'); await refreshDashboard();
+  } catch(error) { $('partnerAccountError').textContent = friendlyError(error); }
+  finally { submit.disabled = false; }
+});
+$('creditTransferForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const amount = Number($('creditTransferAmount').value), available = Number(currentPartnerActor?.credits || 0);
+  if (!transferTarget || !Number.isSafeInteger(amount) || amount < 1 || amount > available) {
+    $('creditTransferError').textContent = 'Enter a whole-number amount no greater than your available balance.'; return;
+  }
+  if (!confirm(`Transfer ${amount} credit${amount === 1 ? '' : 's'} to ${transferTarget.displayName}?`)) return;
+  const submit = $('creditTransferForm').querySelector('[type="submit"]'); submit.disabled = true; $('creditTransferError').textContent = '';
+  try {
+    await transferCredits({ targetUid: transferTarget.uid, amount });
+    transferTarget = null; closeDialog('creditTransferDialog'); await refreshDashboard();
+  } catch (error) { $('creditTransferError').textContent = friendlyError(error); }
+  finally { submit.disabled = false; }
+});
+$('portalEditForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!editingProfile) return;
+  const expiryText = $('editProfileExpiry').value;
+  const expiresAt = expiryText ? new Date(expiryText).getTime() : null;
+  if (expiryText && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { $('portalEditError').textContent = 'Enter a future portal expiry date and time.'; return; }
+  const submit = $('portalEditForm').querySelector('[type="submit"]'); submit.disabled = true; $('portalEditError').textContent = '';
+  try {
+    await updatePortalProfile({ profileId: editingProfile.id, name: $('editProfileName').value.trim(), portalUrl: $('editProfileUrl').value.trim(), expiresAt });
+    editingProfile = null; closeDialog('portalEditDialog'); await refreshProviderDashboard();
+    $('providerError').textContent = 'Portal profile saved. Assigned apps receive it on their next sync.';
+  } catch (error) { $('portalEditError').textContent = friendlyError(error); }
+  finally { submit.disabled = false; }
+});
+document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => closeDialog(button.dataset.closeDialog)));
 $('refresh').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
 $('refreshAdminCustomers').addEventListener('click', loadAdminCustomers);
 $('newKey').addEventListener('click', async () => {
