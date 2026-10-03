@@ -21,6 +21,7 @@ const completePairing = httpsCallable(functions, 'partnerCompletePairing');
 const renewDeviceLicense = httpsCallable(functions, 'partnerRenewDeviceLicense');
 const switchDevicePortal = httpsCallable(functions, 'partnerSwitchDevicePortal');
 const adminProviderDashboard = httpsCallable(functions, 'adminProviderDashboard');
+const adminListPairingProfiles = httpsCallable(functions, 'adminListPairingProfiles');
 const adjustPartnerCredits = httpsCallable(functions, 'adminAdjustPartnerCredits');
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const setVisible = (id, visible) => $(id).classList.toggle('hidden', !visible);
@@ -30,6 +31,7 @@ let currentPartnerData = null;
 let currentPartnerActor = null;
 let transferTarget = null;
 let editingProfile = null;
+let adminPairingProfiles = [];
 let adminKeys = [];
 let showAllAdminKeys = false;
 let partnerLicenses = [];
@@ -126,12 +128,54 @@ async function refreshDashboard() {
     if (actor.role === required && !candidates.some(item => item.uid === actor.uid)) candidates.unshift({ uid:actor.uid, displayName:actor.displayName || actor.email, role:actor.role });
     return candidates;
   };
-  const roleOptions = account => roleChoices.map(role => `<option value="${role}" ${role === account.role ? 'selected' : ''}>${role}</option>`).join('');
-  const parentOptions = account => parentChoices(account.role, account.uid).map(parent => `<option value="${escapeHtml(parent.uid)}" ${parent.uid === account.parentUid ? 'selected' : ''}>${escapeHtml(parent.displayName)} · ${parent.role}</option>`).join('');
+  const requiredParentRole = role => ({ distributor:'admin', reseller:'distributor', provider:'reseller' })[role];
+  const requiredChildRole = role => ({ distributor:'reseller', reseller:'provider', provider:null })[role];
+  const roleChangeReason = (account, role, selectedParentUid) => {
+    const children = allAccounts.filter(item => item.parentUid === account.uid);
+    const allowedChild = requiredChildRole(role);
+    const incompatible = children.filter(item => allowedChild ? item.role !== allowedChild : true);
+    if (incompatible.length) {
+      const names = incompatible.slice(0, 3).map(item => item.displayName || item.email).join(', ');
+      return allowedChild
+        ? `Move these child accounts first; a ${role} can have only ${allowedChild} children: ${names}.`
+        : `Move these child accounts first; a Provider cannot have children: ${names}.`;
+    }
+    if (role === 'distributor') return '';
+    const expectedParent = requiredParentRole(role), candidates = parentChoices(role, account.uid);
+    if (!candidates.length) return `No active ${expectedParent} parent is available in your ${actor.role === 'distributor' ? 'branch' : 'partner list'}.`;
+    if (!selectedParentUid) return `Choose an active ${expectedParent} parent before saving this role.`;
+    if (!candidates.some(item => item.uid === selectedParentUid)) return `Choose an active ${expectedParent} parent in your permitted branch.`;
+    return '';
+  };
+  const roleOptions = account => roleChoices.map(role => {
+    const blockedChildren = allAccounts.filter(item => item.parentUid === account.uid && (requiredChildRole(role) ? item.role !== requiredChildRole(role) : true));
+    const noParent = role !== 'distributor' && !parentChoices(role, account.uid).length;
+    const hint = blockedChildren.length ? ' · move child accounts first' : noParent ? ` · no ${requiredParentRole(role)} available` : '';
+    return `<option value="${role}" ${role === account.role ? 'selected' : ''}>${role}${hint}</option>`;
+  }).join('');
+  const parentOptions = account => {
+    if (account.role === 'distributor') return '<option value="">Admin</option>';
+    const candidates = parentChoices(account.role, account.uid), currentParentExists = candidates.some(parent => parent.uid === account.parentUid);
+    return `<option value="" disabled ${currentParentExists ? '' : 'selected'}>Choose ${requiredParentRole(account.role)} parent</option>${candidates.map(parent => `<option value="${escapeHtml(parent.uid)}" ${parent.uid === account.parentUid ? 'selected' : ''}>${escapeHtml(parent.displayName)} · ${parent.role}</option>`).join('')}`;
+  };
   const canRoleChange = account => (actor.role === 'admin' && roleChoices.includes(account.role)) || (actor.role === 'distributor' && account.role !== 'distributor');
+  const syncRoleEditor = (row, account) => {
+    const role = row.querySelector(`[data-role-for="${CSS.escape(account.uid)}"]`);
+    const parent = row.querySelector(`[data-parent-for="${CSS.escape(account.uid)}"]`);
+    const help = row.querySelector(`[data-role-help="${CSS.escape(account.uid)}"]`);
+    const save = row.querySelector(`[data-partner-action="role"][data-uid="${CSS.escape(account.uid)}"]`);
+    if (!role || !parent || !help || !save) return;
+    const selectedParentUid = role.value === 'distributor' ? null : (parent.value || null);
+    const reason = roleChangeReason(account, role.value, selectedParentUid);
+    const unchanged = role.value === account.role && selectedParentUid === (account.parentUid || null);
+    help.textContent = reason || (unchanged ? '' : `Ready to save ${role.value} under ${role.value === 'distributor' ? 'Admin' : parent.selectedOptions[0]?.textContent || 'the selected parent'}.`);
+    help.classList.toggle('hidden', !reason && unchanged);
+    help.classList.toggle('error', !!reason);
+    save.disabled = !!reason || unchanged;
+  };
   const manage = account => {
     const canTransfer = (actor.role === 'distributor' && account.role === 'reseller') || (actor.role === 'reseller' && account.role === 'provider');
-    return `<div class="accountActions">${canTransfer ? `<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(account.uid)}">Transfer credits</button>` : ''}${actor.role === 'admin' ? `<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(account.uid)}">Adjust credits</button>` : ''}${canRoleChange(account) ? `<details class="roleEditor"><summary>Change role</summary><label>Role<select data-role-for="${escapeHtml(account.uid)}">${roleOptions(account)}</select></label><label>Parent<select data-parent-for="${escapeHtml(account.uid)}">${parentOptions(account)}</select></label><button class="ghost small" data-partner-action="role" data-uid="${escapeHtml(account.uid)}">Save role</button></details>` : ''}</div>`;
+    return `<div class="accountActions">${canTransfer ? `<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(account.uid)}">Transfer credits</button>` : ''}${actor.role === 'admin' ? `<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(account.uid)}">Adjust credits</button>` : ''}${canRoleChange(account) ? `<details class="roleEditor"><summary>Change role</summary><label>Role<select data-role-for="${escapeHtml(account.uid)}">${roleOptions(account)}</select></label><label>Parent<select data-parent-for="${escapeHtml(account.uid)}" ${account.role === 'distributor' ? 'disabled' : ''}>${parentOptions(account)}</select></label><p class="note roleHelp hidden" data-role-help="${escapeHtml(account.uid)}"></p><button class="ghost small" data-partner-action="role" data-uid="${escapeHtml(account.uid)}">Save role</button></details>` : ''}</div>`;
   };
   const details = account => {
     const events = (partnerData.recentActivity || []).filter(item => item.fromUid === account.uid || item.toUid === account.uid || item.actorUid === account.uid).slice(0, 8);
@@ -144,6 +188,11 @@ async function refreshDashboard() {
   $('partnerOverviewActivity').classList.toggle('hidden', recentEvents.length === 0);
   $('accountsBody').innerHTML = allAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
   $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span><small>Created ${escapeHtml(formatDate(a.createdAt))}</small></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
+  document.querySelectorAll('#accountsBody tr, #accountsCards .accountCard').forEach(row => {
+    const role = row.querySelector('[data-role-for]');
+    const account = role && allAccounts.find(item => item.uid === role.dataset.roleFor);
+    if (account) syncRoleEditor(row, account);
+  });
   $('accountsBody').onclick = $('accountsCards').onclick = async event => {
     const button = event.target.closest('[data-partner-action]'); if (!button) return;
     const account = partnerData.accounts.find(a => a.uid === button.dataset.uid); if (!account) return;
@@ -182,15 +231,27 @@ async function refreshDashboard() {
     } catch(error) { alert(friendlyError(error)); }
   };
   $('accountsBody').onchange = $('accountsCards').onchange = event => {
-    const role = event.target.closest('[data-role-for]'); if (!role) return;
-    const uid = role.dataset.roleFor, row = role.closest('tr') || role.closest('.accountCard');
+    const role = event.target.closest('[data-role-for]');
+    const parentField = event.target.closest('[data-parent-for]');
+    if (!role && !parentField) return;
+    const uid = (role || parentField).dataset.roleFor || (role || parentField).dataset.parentFor;
+    const row = event.target.closest('tr') || event.target.closest('.accountCard');
+    const account = partnerData.accounts.find(item => item.uid === uid);
+    if (!account || !row) return;
     const parent = row.querySelector(`[data-parent-for="${CSS.escape(uid)}"]`);
-    if (role.value === 'distributor') parent.innerHTML = '<option value="">Admin</option>';
-    else {
-      const required = role.value === 'reseller' ? 'distributor' : 'reseller';
-      const candidates = parentChoices(role.value, uid);
-      parent.innerHTML = candidates.map(item => `<option value="${escapeHtml(item.uid)}" ${item.uid === partnerData.accounts.find(a=>a.uid===uid)?.parentUid ? 'selected' : ''}>${escapeHtml(item.displayName)} · ${item.role}</option>`).join('');
+    if (role) {
+      if (role.value === 'distributor') {
+        parent.innerHTML = '<option value="">Admin</option>';
+        parent.disabled = true;
+      } else {
+        const candidates = parentChoices(role.value, uid);
+        const retainedParent = candidates.some(item => item.uid === account.parentUid) ? account.parentUid : '';
+        parent.innerHTML = `<option value="" disabled ${retainedParent ? '' : 'selected'}>Choose ${requiredParentRole(role.value)} parent</option>${candidates.map(item => `<option value="${escapeHtml(item.uid)}" ${item.uid === retainedParent ? 'selected' : ''}>${escapeHtml(item.displayName)} · ${item.role}</option>`).join('')}`;
+        parent.disabled = candidates.length === 0;
+        parent.value = retainedParent;
+      }
     }
+    syncRoleEditor(row, account);
   };
 
   if (actor.role !== 'admin') return;
@@ -404,9 +465,57 @@ $('partnerLimitsForm').addEventListener('submit', async event => {
 
 $('refreshProvider').addEventListener('click', () => refreshProviderDashboard().catch(error => { $('providerError').textContent = friendlyError(error); }));
 $('pairCustomer').addEventListener('click', () => {
+  setVisible('adminPairingOwnerField', false);
+  $('adminPairingOwner').required = false;
+  $('pairingDialogTitle').textContent = 'Assign a device';
+  $('pairingHelp').textContent = `Enter the short-lived code shown in the customer's app. Choose 1–10 years; each year uses 1 credit. Re-pairing an already licensed device changes its assignment without charging again.`;
   $('providerError').textContent = '';
   $('pairingResult').textContent = '';
   openDialog('pairCustomerDialog');
+});
+$('pairAdminCustomer').addEventListener('click', () => {
+  const targets = (currentPartnerData?.accounts || [])
+    .filter(account => account.active && ['distributor','reseller','provider'].includes(account.role))
+    .sort((a, b) => `${a.displayName} ${a.role}`.localeCompare(`${b.displayName} ${b.role}`));
+  $('adminCustomerError').textContent = '';
+  $('adminPairingNotice').textContent = '';
+  $('adminPairingOwner').innerHTML = '<option value="">Choose an active partner</option>' + targets.map(account => `<option value="${escapeHtml(account.uid)}">${escapeHtml(account.displayName)} · ${escapeHtml(account.role)} · ${account.credits} credits</option>`).join('');
+  $('adminPairingOwner').value = '';
+  $('adminPairingOwner').required = true;
+  $('pairingProfile').innerHTML = '<option value="">Choose a partner first</option>';
+  $('pairingProfile').disabled = true;
+  $('adminPairingCreditNote').textContent = 'Choose who will own this customer. A new license uses credits from that partner.';
+  $('pairingDialogTitle').textContent = 'Add customer to a partner';
+  $('pairingHelp').textContent = `Choose the active partner that will own this customer, then enter the short-lived code from the customer's app. A new license uses 1 credit per year; reassigning an already licensed device does not charge again.`;
+  $('pairingResult').textContent = '';
+  setVisible('adminPairingOwnerField', true);
+  openDialog('pairCustomerDialog');
+});
+$('adminPairingOwner').addEventListener('change', async () => {
+  const partnerUid = $('adminPairingOwner').value;
+  $('pairingResult').textContent = '';
+  $('pairingProfile').disabled = true;
+  $('pairingProfile').innerHTML = '<option value="">Loading active STB profiles…</option>';
+  if (!partnerUid) {
+    $('pairingProfile').innerHTML = '<option value="">Choose a partner first</option>';
+    $('adminPairingCreditNote').textContent = 'Choose who will own this customer. A new license uses credits from that partner.';
+    return;
+  }
+  const partner = currentPartnerData?.accounts.find(account => account.uid === partnerUid);
+  try {
+    const data = (await adminListPairingProfiles({ partnerUid })).data;
+    adminPairingProfiles = data.profiles;
+    $('pairingProfile').innerHTML = data.profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)} · ${escapeHtml(profile.host || 'host unavailable')}</option>`).join('') || '<option value="">No active STB profiles</option>';
+    $('pairingProfile').disabled = data.profiles.length === 0;
+    $('adminPairingCreditNote').textContent = data.profiles.length
+      ? `${data.partner.displayName} has ${data.partner.credits} credits. The selected 1–10 year term will be deducted from this account when a new customer license is activated.`
+      : `${data.partner.displayName} has no active STB profiles. Add one in that account's Settings before pairing a customer.`;
+  } catch (error) {
+    adminPairingProfiles = [];
+    $('pairingProfile').innerHTML = '<option value="">Could not load profiles</option>';
+    $('adminPairingCreditNote').textContent = friendlyError(error);
+  }
+  if (partner && !adminPairingProfiles.length) $('pairingProfile').disabled = true;
 });
 $('portalProfileForm').addEventListener('submit', async event => {
   event.preventDefault(); $('providerError').textContent = '';
@@ -420,17 +529,35 @@ $('portalProfileForm').addEventListener('submit', async event => {
 });
 $('pairingForm').addEventListener('submit', async event => {
   event.preventDefault(); $('pairingResult').textContent = '';
+  const actor = currentPartnerActor;
+  const isAdmin = actor?.role === 'admin';
+  const partnerUid = isAdmin ? $('adminPairingOwner').value : '';
   const pairingCode = $('pairingCode').value.trim().toUpperCase(), profileId = $('pairingProfile').value;
-  if (!profileId) { $('pairingResult').textContent = 'Create an active portal profile first.'; return; }
+  if (isAdmin && !partnerUid) { $('pairingResult').textContent = 'Choose which partner account will own this customer.'; return; }
+  if (!profileId) { $('pairingResult').textContent = 'Choose an active STB profile first.'; return; }
+  const submit = $('pairingForm').querySelector('[type="submit"]');
+  submit.disabled = true;
   try {
-    const result = (await completePairing({ pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), durationYears: Number($('durationYears').value) })).data;
     const years = Number($('durationYears').value);
-    const summary = result.existingLicense ? 'Device portal assignment updated; existing license retained.' : `Device paired for ${years} year${years === 1 ? '' : 's'}. ${years} credit${years === 1 ? '' : 's'} used; ${result.remainingCredits} credits remain.`;
+    const payload = { pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), durationYears: years };
+    if (isAdmin) payload.partnerUid = partnerUid;
+    const result = (await completePairing(payload)).data;
+    const ownerName = result.ownerName || actor?.displayName || actor?.role || 'Partner';
+    const summary = result.existingLicense
+      ? `${ownerName}: existing license kept; no credits deducted. Balance remains ${result.remainingCredits} credits.`
+      : `${years}-year customer license activated. ${result.creditsUsed} credits deducted from ${ownerName}; new balance: ${result.remainingCredits}.`;
     $('pairingForm').reset();
     closeDialog('pairCustomerDialog');
-    await refreshProviderDashboard(); await refreshDashboard();
-    $('providerError').textContent = summary;
+    if (isAdmin) $('adminPairingNotice').textContent = summary;
+    else $('providerError').textContent = summary;
+    try { await refreshDashboard(); }
+    catch (refreshError) {
+      const message = 'Customer pairing succeeded, but the dashboard did not refresh. Reload the panel to see the updated balance.';
+      if (isAdmin) $('adminCustomerError').textContent = `${message} ${friendlyError(refreshError)}`;
+      else $('providerError').textContent = `${summary} ${message}`;
+    }
   } catch (error) { $('pairingResult').textContent = friendlyError(error); }
+  finally { submit.disabled = false; }
 });
 
 onAuthStateChanged(auth, async user => {

@@ -89,8 +89,8 @@ async function createPortal(token, ownerName, suffix, expiresAt = null) {
   });
 }
 
-async function seedPairing(deviceName) {
-  const deviceId = `emulator-device-${deviceName}-${randomBytes(5).toString('hex')}`;
+async function seedPairing(deviceName, existingDeviceId = null) {
+  const deviceId = existingDeviceId || `emulator-device-${deviceName}-${randomBytes(5).toString('hex')}`;
   const deviceToken = randomBytes(24).toString('hex');
   const pairingCode = randomBytes(6).toString('hex').toUpperCase();
   const deviceHash = hash(deviceId);
@@ -231,14 +231,57 @@ async function test() {
 
   const distributorPortalA = await createPortal(distributor.token, distributor.name, 'A');
   const distributorPortalB = await createPortal(distributor.token, distributor.name, 'B');
+  const distributorBeforeCustomerActivation = (await account(distributor.uid)).credits;
   const distributorPairing = await pair(distributor, distributorPortalA.profileId, 'Distributor customer', 10);
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeCustomerActivation - 10, 'A Distributor customer activation deducts one credit per license year.');
   const distributorKey = (await db.collection('registrationKeys').doc(distributorPairing.result.licenseId).get()).data();
   const distributorActivation = distributorKey.activatedAt.toMillis();
   assert.equal(distributorKey.durationMonths, 120);
   assert.equal(distributorKey.expiresAt.toMillis(), addMonthsUtc(distributorActivation, 120));
   assert.equal(distributorKey.graceUntil.toMillis(), distributorKey.expiresAt.toMillis() + 7 * 24 * 60 * 60 * 1000);
+  const distributorBeforeReassignment = (await account(distributor.uid)).credits;
+  const distributorRePairing = await seedPairing('distributor-existing-customer', distributorPairing.deviceId);
+  const distributorRePairResult = await invoke('partnerCompletePairing', distributor.token, {
+    pairingCode: distributorRePairing.pairingCode, profileId: distributorPortalA.profileId,
+    customerLabel: 'Distributor customer', durationYears: 1
+  });
+  assert.equal(distributorRePairResult.existingLicense, true);
+  assert.equal(distributorRePairResult.creditsUsed, 0);
+  assert.equal(distributorRePairResult.remainingCredits, distributorBeforeReassignment);
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeReassignment, 'Reassigning the same licensed device does not charge twice.');
   await invoke('partnerSwitchDevicePortal', distributor.token, { deviceRef: distributorPairing.deviceHash, profileId: distributorPortalB.profileId });
-  assert.equal((await syncDevice(distributorPairing)).portal.name, 'Distributor One B');
+  assert.equal((await syncDevice(distributorRePairing)).portal.name, 'Distributor One B');
+
+  const distributorProfiles = await invoke('adminListPairingProfiles', adminUser.token, { partnerUid: distributor.uid });
+  assert.equal(distributorProfiles.partner.credits, distributorBeforeCustomerActivation - 10);
+  assert(distributorProfiles.profiles.some(profile => profile.id === distributorPortalA.profileId));
+  await expectCallableError(invoke('adminListPairingProfiles', distributor.token, { partnerUid: distributor.uid }), 'Admin access is required');
+  const invalidAdminPairing = await seedPairing('admin-invalid-profile-owner');
+  const distributorBeforeRejectedAdminPair = (await account(distributor.uid)).credits;
+  await expectCallableError(invoke('partnerCompletePairing', adminUser.token, {
+    partnerUid: distributor.uid, pairingCode: invalidAdminPairing.pairingCode,
+    profileId: providerPortalA.profileId, customerLabel: 'Wrong profile owner', durationYears: 1
+  }), 'owned by the selected partner account');
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeRejectedAdminPair, 'An Admin pairing with another partner\'s profile does not charge credits.');
+
+  const adminPairing = await seedPairing('admin-created-customer');
+  const distributorBeforeAdminPair = (await account(distributor.uid)).credits;
+  const adminPairResult = await invoke('partnerCompletePairing', adminUser.token, {
+    partnerUid: distributor.uid, pairingCode: adminPairing.pairingCode,
+    profileId: distributorPortalB.profileId, customerLabel: 'Admin-added customer', durationYears: 2
+  });
+  assert.equal(adminPairResult.ownerUid, distributor.uid);
+  assert.equal(adminPairResult.ownerRole, 'distributor');
+  assert.equal(adminPairResult.creditsUsed, 2);
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeAdminPair - 2, 'Admin-added customer licenses debit the selected partner atomically.');
+  ledgerRows = (await db.collection('creditLedger').where('type', '==', 'license_issued').get()).docs.map(doc => doc.data());
+  assert(ledgerRows.some(row => row.fromUid === distributor.uid && row.toUid === adminPairing.deviceHash && row.amount === 2 && row.actorUid === adminUser.uid), 'Admin pairing is attributed to Admin while charging the selected partner.');
+  const distributorWorkspaceAfterAdminPair = await invoke('partnerProviderDashboard', distributor.token);
+  assert(distributorWorkspaceAfterAdminPair.customers.some(row => row.deviceRef === adminPairing.deviceHash), 'Admin-created customers appear in the selected partner workspace.');
+  const adminDashboardAfterPair = await invoke('adminProviderDashboard', adminUser.token);
+  const adminAddedCustomer = adminDashboardAfterPair.customers.find(row => row.deviceId === adminPairing.deviceHash);
+  assert.equal(adminAddedCustomer.partnerRole, 'distributor');
+  assert.equal(adminAddedCustomer.createdByName, adminUser.name);
 
   const distributorBeforeTransfer = (await account(distributor.uid)).credits;
   const resellerBeforeTransfer = (await account(reseller.uid)).credits;
@@ -276,10 +319,11 @@ async function test() {
     invoke('partnerSetAccountRole', adminUser.token, { targetUid: roleProvider.uid, newRole: 'reseller', newParentUid: reseller.uid }),
     'must be under a distributor'
   );
-  await expectCallableError(
+  const blockedRoleChange = await expectCallableError(
     invoke('partnerSetAccountRole', adminUser.token, { targetUid: reseller.uid, newRole: 'distributor', newParentUid: null }),
     'child accounts'
   );
+  assert.match(blockedRoleChange.message, /Provider One/i, 'A blocked role change identifies the incompatible child account.');
   assert.equal((await account(reseller.uid)).role, 'reseller', 'Role changes with incompatible child accounts leave the role unchanged.');
 
   const outsiderDistResult = await invoke('adminCreateDistributor', adminUser.token, {
