@@ -216,25 +216,15 @@ const callables = {
     recentActivity.forEach(item => {
       if (item.toUid && deviceNames.has(item.toUid)) item.toName = deviceNames.get(item.toUid);
     });
-    let creditSummary = null;
-    if (actor.role === 'admin') {
-      const sum = async query => (await query.aggregate({ total: AggregateField.sum('amount') }).get()).data().total || 0;
-      const [allocated, used, transferred, held, signedAdjustment] = await Promise.all([
-        sum(ledger.where('type', '==', 'admin_allocation')),
-        sum(ledger.where('type', 'in', ['license_issued', 'license_renewal'])),
-        sum(ledger.where('type', '==', 'transfer')),
-        (await accounts.aggregate({ total: AggregateField.sum('credits') }).get()).data().total || 0,
-        (await ledger.where('type', '==', 'admin_adjustment').aggregate({ total: AggregateField.sum('delta') }).get()).data().total || 0
-      ]);
-      // Adjustments can add or remove credits, so reconcile using their signed delta.
-      creditSummary = { allocated, adjustmentNet: signedAdjustment, used, transferred, held,
-        reconciliation: allocated + signedAdjustment - used - held };
-    }
+    const dashboardLimits = await readLimits();
     return {
       account: { uid: actor.uid, role: actor.role, displayName: cleanText(actor.displayName, 100),
         email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) },
-      limits: actor.role === 'admin' ? await readLimits() : null,
-      creditSummary,
+      limits: actor.role === 'admin' ? dashboardLimits : null,
+      transferRules: {
+        distributorToResellerMax: integer(dashboardLimits.distributorToResellerMax, 250),
+        resellerToProviderMin: integer(dashboardLimits.resellerToProviderMin, 20)
+      },
       recentActivity,
       accounts: partnerRows.map(([uid, data]) => {
         return { uid, displayName: cleanText(data.displayName, 100), email: cleanText(data.email, 254),
@@ -247,6 +237,24 @@ const callables = {
           roleUpdatedAt: data.roleUpdatedAt?.toDate?.().toISOString?.() || null };
       })
     };
+  }),
+
+  adminCreditSummary: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
+    const sum = async query => (await query.aggregate({ total: AggregateField.sum('amount') }).get()).data().total || 0;
+    const [allocated, issued, renewed, transferred, held, signedAdjustment] = await Promise.all([
+      sum(ledger.where('type', '==', 'admin_allocation')),
+      sum(ledger.where('type', '==', 'license_issued')),
+      sum(ledger.where('type', '==', 'license_renewal')),
+      sum(ledger.where('type', '==', 'transfer')),
+      (await accounts.aggregate({ total: AggregateField.sum('credits') }).get()).data().total || 0,
+      (await ledger.where('type', '==', 'admin_adjustment').aggregate({ total: AggregateField.sum('delta') }).get()).data().total || 0
+    ]);
+    const used = issued + renewed;
+    // Adjustments can add or remove credits, so reconcile using their signed delta.
+    return { allocated, adjustmentNet: signedAdjustment, used, transferred, held,
+      reconciliation: allocated + signedAdjustment - used - held };
   }),
 
   partnerProviderDashboard: onCall({ region }, async request => {
