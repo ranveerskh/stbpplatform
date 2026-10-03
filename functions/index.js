@@ -136,7 +136,7 @@ exports.appApi = onRequest({ region, cors: true, maxInstances: 10 }, async (req,
   res.set('Cache-Control', 'no-store');
   try {
     const method = req.method.toUpperCase(), route = req.path.replace(/\/$/, '') || '/';
-    if (['/api/pairing/start', '/api/pairing/status', '/api/device/sync'].includes(route)) {
+    if (['/api/pairing/start', '/api/pairing/status', '/api/pairing/cancel', '/api/device/sync'].includes(route)) {
       if (method !== 'POST') return res.status(405).json({ error: 'POST is required.' });
       return partnerFunctions.handleAppApi(req, res, method, route);
     }

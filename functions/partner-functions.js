@@ -224,6 +224,8 @@ const callables = {
       const inGrace = !!expiresAt && expiresAt <= now && !!graceUntil && graceUntil > now;
       return {
         deviceRef: doc.id,
+        deviceId: doc.id,
+        portalMac: cleanText(assignment.portalMac, 17).toUpperCase(),
         customerLabel: cleanText(assignment.customerLabel, 100) || 'Customer device',
         platform: cleanText(assignment.platform, 20), active: assignment.active === true && key.active === true,
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
@@ -277,6 +279,8 @@ const callables = {
       try { portalHost = new URL(profile.portalUrl).hostname; } catch {}
       return {
         customerLabel: cleanText(row.customerLabel, 100) || 'Customer device',
+        deviceId: row.id,
+        portalMac: cleanText(row.portalMac, 17).toUpperCase(),
         providerName: cleanText(provider.displayName, 100) || 'Provider account',
         providerEmail: cleanText(provider.email, 254),
         licenseId: cleanText(row.licenseId, 128), active: enabled,
@@ -492,7 +496,9 @@ const callables = {
 
 async function beginPairing(req, res) {
   const deviceId = cleanText(req.body?.deviceId, 128), platform = cleanText(req.body?.platform, 20).toLowerCase();
+  const portalMac = cleanText(req.body?.portalMac, 17).toUpperCase();
   if (!deviceId || !['android', 'windows'].includes(platform)) return res.status(400).json({ error: 'Device ID and supported platform are required.' });
+  if (portalMac && !/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(portalMac)) return res.status(400).json({ error: 'Portal MAC address is invalid.' });
   const deviceHash = sha256(deviceId), code = randomBytes(6).toString('hex').toUpperCase(), token = randomBytes(32).toString('base64url');
   const codeRef = pairingCodes.doc(sha256(code)), deviceRef = db.collection('pairingRequests').doc(deviceHash);
   const now = Date.now(), expiresAt = now + 10 * 60 * 1000;
@@ -503,7 +509,7 @@ async function beginPairing(req, res) {
     const last = deviceSnap.data()?.lastCreatedAt?.toMillis?.() || 0;
     if (last && now - last < 45 * 1000) { waitSeconds = Math.ceil((45 * 1000 - (now - last)) / 1000); return; }
     tx.set(deviceRef, { lastCreatedAt: admin.firestore.Timestamp.fromMillis(now), activeCodeHash: sha256(code), updatedAt: stamp() }, { merge: true });
-    tx.create(codeRef, { deviceHash, platform, deviceTokenHash: sha256(token), createdAt: stamp(), expiresAt: admin.firestore.Timestamp.fromMillis(expiresAt), state: 'pending' });
+    tx.create(codeRef, { deviceHash, platform, portalMac: portalMac || null, deviceTokenHash: sha256(token), createdAt: stamp(), expiresAt: admin.firestore.Timestamp.fromMillis(expiresAt), state: 'pending' });
   });
   if (waitSeconds) return res.status(429).json({ error: `Wait ${waitSeconds} seconds before requesting another pairing code.`, retryAfterSeconds: waitSeconds });
   return res.status(200).json({ pairingCode: code, deviceToken: token, expiresAt: new Date(expiresAt).toISOString() });
@@ -528,6 +534,7 @@ async function completePairing(request) {
     if (profile.ownerUid !== actor.uid || profile.active !== true) fail('permission-denied', 'Select an active portal profile owned by your account.');
     if (provider.active !== true) fail('permission-denied', 'Provider account is disabled.');
     const assignmentRef = assignments.doc(pairing.deviceHash), assignmentSnap = await tx.get(assignmentRef);
+    const portalMac = pairing.portalMac || (assignmentSnap.exists ? cleanText(assignmentSnap.data().portalMac, 17).toUpperCase() : '');
     let licenseId, expiresAt, graceUntil;
     if (assignmentSnap.exists && assignmentSnap.data().active === true) {
       const oldAssignment = assignmentSnap.data();
@@ -538,7 +545,7 @@ async function completePairing(request) {
       expiresAt = oldKeySnap.data().expiresAt;
       graceUntil = oldKeySnap.data().graceUntil;
       tx.update(assignmentRef, { portalProfileId: profileId, deviceTokenHash: pairing.deviceTokenHash,
-        platform: pairing.platform, customerLabel: label, providerName: cleanText(provider.displayName, 100), updatedAt: stamp() });
+        platform: pairing.platform, portalMac: portalMac || null, customerLabel: label, providerName: cleanText(provider.displayName, 100), updatedAt: stamp() });
       result = { existingLicense: true };
     } else {
       const balance = integer(provider.credits, 0);
@@ -553,7 +560,7 @@ async function completePairing(request) {
         activatedAt: admin.firestore.Timestamp.fromMillis(activatedAtMillis), expiresAt, graceUntil,
         createdAt: stamp(), createdBy: actor.uid, portalProfileId: profileId });
       tx.create(assignmentRef, { deviceHash: pairing.deviceHash, licenseId, ownerUid: actor.uid, portalProfileId: profileId,
-        deviceTokenHash: pairing.deviceTokenHash, platform: pairing.platform, customerLabel: label,
+        deviceTokenHash: pairing.deviceTokenHash, platform: pairing.platform, portalMac: portalMac || null, customerLabel: label,
         providerName: cleanText(provider.displayName, 100), active: true, createdAt: stamp(), updatedAt: stamp(), lastSyncedAt: stamp() });
       tx.create(keyRef.collection('devices').doc(pairing.deviceHash), { active: true, platform: pairing.platform,
         registeredAt: stamp(), lastSeen: stamp(), deleteAt: admin.firestore.Timestamp.fromMillis(graceUntilMillis) });
@@ -561,7 +568,7 @@ async function completePairing(request) {
     }
     tx.update(codeRef, { state: 'completed', providerUid: actor.uid, profileId, assignmentId: pairing.deviceHash,
       licenseId, completedAt: stamp() });
-    result = { ...result, licenseId, expiresAt: expiresAt?.toDate?.().toISOString?.() || null,
+    result = { ...result, deviceId: pairing.deviceHash, portalMac: portalMac || null, licenseId, expiresAt: expiresAt?.toDate?.().toISOString?.() || null,
       graceUntil: graceUntil?.toDate?.().toISOString?.() || null };
   });
   await auditEvent(actor.uid, 'device_paired', result.licenseId, { profileId, existingLicense: result.existingLicense });
@@ -585,6 +592,22 @@ async function getPairingStatus(req, res) {
   const [keySnap, profileSnap] = await Promise.all([registrationKeys.doc(data.licenseId).get(), portalProfiles.doc(data.portalProfileId).get()]);
   if (!keySnap.exists || !profileSnap.exists || profileSnap.data().active !== true) return res.status(403).json({ error: 'License or portal assignment is unavailable.' });
   return res.status(200).json({ state: 'completed', ...publicAssignment(keySnap.data(), profileSnap.data()) });
+}
+
+
+async function cancelPairing(req, res) {
+  const deviceId = cleanText(req.body?.deviceId, 128), code = cleanText(req.body?.pairingCode, 20).toUpperCase();
+  const token = cleanText(req.body?.deviceToken, 200);
+  if (!deviceId || !token || !/^[A-F0-9]{12}$/.test(code)) return res.status(400).json({ error: 'Device ID, device token, and valid pairing code are required.' });
+  const codeRef = pairingCodes.doc(sha256(code));
+  const codeSnap = await codeRef.get();
+  if (!codeSnap.exists || codeSnap.data().deviceHash !== sha256(deviceId)) return res.status(404).json({ error: 'Pairing request was not found.' });
+  if (codeSnap.data().deviceTokenHash !== sha256(token)) return res.status(403).json({ error: 'Pairing request is not authorized for this device.' });
+  await db.runTransaction(async tx => {
+    const latest = await tx.get(codeRef);
+    if (latest.exists && latest.data().state === 'pending') tx.update(codeRef, { state: 'cancelled', cancelledAt: stamp() });
+  });
+  return res.status(200).json({ cancelled: true });
 }
 
 async function syncDevice(req, res) {
@@ -616,6 +639,7 @@ async function syncDevice(req, res) {
 async function handleAppApi(req, res, method, route) {
   if (method === 'POST' && route === '/api/pairing/start') return beginPairing(req, res);
   if (method === 'POST' && route === '/api/pairing/status') return getPairingStatus(req, res);
+  if (method === 'POST' && route === '/api/pairing/cancel') return cancelPairing(req, res);
   if (method === 'POST' && route === '/api/device/sync') return syncDevice(req, res);
   return null;
 }
