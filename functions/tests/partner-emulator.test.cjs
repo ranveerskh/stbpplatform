@@ -143,6 +143,8 @@ async function test() {
     displayName: 'Provider One', email: 'provider-one@example.test', role: 'provider', credits: 20
   });
   const provider = await signInPartner(providerResult.uid, 'provider-one@example.test', 'Provider One');
+  assert.equal((await invoke('partnerListDashboard', distributor.token)).transferRules.distributorToResellerMax, 250);
+  assert.equal((await invoke('partnerListDashboard', reseller.token)).transferRules.resellerToProviderMin, 20);
 
   const providerPortalA = await createPortal(provider.token, provider.name, 'A');
   const providerPortalB = await createPortal(provider.token, provider.name, 'B');
@@ -167,9 +169,12 @@ async function test() {
   assert(ledgerRows.some(row => row.type === 'license_issued' && row.fromUid === provider.uid && row.toUid === providerPairing.deviceHash && row.amount === 1 && row.durationYears === 1));
 
   const dashboard = await invoke('partnerListDashboard', adminUser.token);
-  assert.deepEqual(dashboard.creditSummary, {
+  assert.equal(dashboard.creditSummary, undefined, 'The partner list endpoint stays independent from optional Admin credit totals.');
+  const creditSummary = await invoke('adminCreditSummary', adminUser.token);
+  assert.deepEqual(creditSummary, {
     allocated: 500, adjustmentNet: 0, used: 1, transferred: 40, held: 499, reconciliation: 0
   }, 'Admin credit overview reconciles issued credits, license use, transfers, and current partner balances.');
+  await expectCallableError(invoke('adminCreditSummary', distributor.token), 'Admin access is required');
   const resellerRow = dashboard.accounts.find(row => row.uid === reseller.uid);
   const providerRow = dashboard.accounts.find(row => row.uid === provider.uid);
   assert.equal(resellerRow.createdByName, distributor.name);
@@ -235,7 +240,18 @@ async function test() {
   await invoke('partnerSwitchDevicePortal', distributor.token, { deviceRef: distributorPairing.deviceHash, profileId: distributorPortalB.profileId });
   assert.equal((await syncDevice(distributorPairing)).portal.name, 'Distributor One B');
 
+  const distributorBeforeTransfer = (await account(distributor.uid)).credits;
+  const resellerBeforeTransfer = (await account(reseller.uid)).credits;
+  const transferRowsBefore = (await db.collection('creditLedger').where('type', '==', 'transfer').get()).size;
+  await expectCallableError(invoke('partnerTransferCredits', distributor.token, { targetUid: reseller.uid, amount: 251 }), 'Maximum reseller allocation is 250');
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeTransfer, 'A rejected over-limit transfer leaves the Distributor balance unchanged.');
+  assert.equal((await account(reseller.uid)).credits, resellerBeforeTransfer, 'A rejected over-limit transfer leaves the Reseller balance unchanged.');
+  assert.equal((await db.collection('creditLedger').where('type', '==', 'transfer').get()).size, transferRowsBefore, 'A rejected transfer does not add a ledger row.');
   await invoke('partnerTransferCredits', distributor.token, { targetUid: reseller.uid, amount: 20 });
+  assert.equal((await account(distributor.uid)).credits, distributorBeforeTransfer - 20);
+  assert.equal((await account(reseller.uid)).credits, resellerBeforeTransfer + 20);
+  ledgerRows = (await db.collection('creditLedger').where('type', '==', 'transfer').get()).docs.map(doc => doc.data());
+  assert(ledgerRows.some(row => row.fromUid === distributor.uid && row.toUid === reseller.uid && row.amount === 20), 'The Distributor → Reseller transfer is ledgered atomically.');
   const resellerPortalA = await createPortal(reseller.token, reseller.name, 'A');
   const resellerPortalB = await createPortal(reseller.token, reseller.name, 'B');
   const resellerPairing = await pair(reseller, resellerPortalA.profileId, 'Reseller customer', 1);

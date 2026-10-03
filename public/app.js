@@ -8,6 +8,7 @@ const createKey = httpsCallable(functions, 'adminCreateKey');
 const setKeyStatus = httpsCallable(functions, 'adminSetKeyStatus');
 const setVersionRules = httpsCallable(functions, 'adminSetVersionRules');
 const listPartnerDashboard = httpsCallable(functions, 'partnerListDashboard');
+const loadAdminCreditSummary = httpsCallable(functions, 'adminCreditSummary');
 const createDistributor = httpsCallable(functions, 'adminCreateDistributor');
 const createPartnerChild = httpsCallable(functions, 'partnerCreateChild');
 const transferCredits = httpsCallable(functions, 'partnerTransferCredits');
@@ -72,14 +73,16 @@ function showAdminTab(tab) {
     partners: ['partnerPanel', 'partnerLimitsPanel'], customers: ['adminCustomersPanel']
   } : {
     overview: ['partnerOverviewPanel'], keys: ['partnerKeysPanel'],
-    partners: role === 'provider' ? [] : ['partnerPanel'], customers: ['providerPanel']
+    partners: role === 'provider' ? [] : ['partnerPanel'], customers: ['providerPanel'], settings: ['partnerSettingsPanel']
   };
   if (!views[tab]) tab = 'overview';
   activeAdminTab = tab;
-  for (const id of ['adminCreditOverview','statsPanel','devicesPanel','keysPanel','partnerPanel','partnerLimitsPanel','adminCustomersPanel','partnerOverviewPanel','partnerKeysPanel','providerPanel']) {
+  for (const id of ['adminCreditOverview','statsPanel','devicesPanel','keysPanel','partnerPanel','partnerLimitsPanel','adminCustomersPanel','partnerOverviewPanel','partnerKeysPanel','providerPanel','partnerSettingsPanel']) {
     setVisible(id, views[tab].includes(id));
   }
   document.querySelector('[data-admin-tab="partners"]').classList.toggle('hidden', !isAdmin && role === 'provider');
+  document.querySelector('[data-admin-tab="settings"]').classList.toggle('hidden', isAdmin);
+  setVisible('providerError', !isAdmin);
   document.querySelector('[data-admin-tab="keys"]').textContent = isAdmin ? 'Keys' : 'My licenses';
   document.querySelectorAll('[data-admin-tab]').forEach(button => {
     const selected = button.dataset.adminTab === tab;
@@ -91,6 +94,7 @@ document.querySelectorAll('[data-admin-tab]').forEach(button => button.addEventL
   showAdminTab(button.dataset.adminTab);
   if (activeAdminTab === 'customers' && currentPartnerActor?.role === 'admin') loadAdminCustomers();
   else if (activeAdminTab === 'customers') refreshProviderDashboard().catch(error => $('providerError').textContent = friendlyError(error));
+  else if (activeAdminTab === 'settings') refreshProviderDashboard().catch(error => $('providerError').textContent = friendlyError(error));
 }));
 
 async function refreshDashboard() {
@@ -147,10 +151,21 @@ async function refreshDashboard() {
       if (button.dataset.partnerAction === 'transfer') {
         transferTarget = account;
         $('creditTransferRecipient').textContent = `${account.displayName} · ${account.role}`;
-        $('creditTransferAmount').value = actor.role === 'reseller' ? '20' : '';
-        $('creditTransferAmount').max = String(actor.credits);
-        $('creditTransferAvailable').textContent = `Available balance: ${actor.credits} credits. The transfer and ledger entry are saved together.`;
+        const rules = partnerData.transferRules || {};
+        const minimum = actor.role === 'reseller' && account.role === 'provider' ? Number(rules.resellerToProviderMin || 20) : 1;
+        const perTransferMaximum = actor.role === 'distributor' && account.role === 'reseller'
+          ? Number(rules.distributorToResellerMax || 250) : actor.credits;
+        const maximum = Math.min(actor.credits, perTransferMaximum);
+        $('creditTransferAmount').min = String(minimum);
+        $('creditTransferAmount').max = String(maximum);
+        $('creditTransferAmount').value = actor.role === 'reseller' && maximum >= minimum ? String(minimum) : '';
+        const limitMessage = actor.role === 'distributor'
+          ? `Maximum per Distributor → Reseller transfer: ${perTransferMaximum} credits.`
+          : `Minimum per Reseller → Provider transfer: ${minimum} credits.`;
+        $('creditTransferAvailable').textContent = `Available balance: ${actor.credits} credits. ${limitMessage} Each transfer and its ledger entry are saved together.`;
         $('creditTransferError').textContent = '';
+        $('creditTransferForm').querySelector('[type="submit"]').disabled = maximum < minimum;
+        if (maximum < minimum) $('creditTransferError').textContent = `You need at least ${minimum} available credits for this transfer.`;
         openDialog('creditTransferDialog');
         return;
       } else if (button.dataset.partnerAction === 'adjust' && actor.role === 'admin') {
@@ -188,13 +203,18 @@ async function refreshDashboard() {
   $('active30d').textContent = result.appUsage?.active30d ?? 0;
   $('androidCount').textContent = result.platformCounts.android;
   $('windowsCount').textContent = result.platformCounts.windows;
-  const credits = partnerData.creditSummary || {};
-  $('creditsAllocated').textContent = Number(credits.allocated || 0).toLocaleString();
-  $('creditsUsed').textContent = Number(credits.used || 0).toLocaleString();
-  $('creditsHeld').textContent = Number(credits.held || 0).toLocaleString();
-  $('creditsTransferred').textContent = Number(credits.transferred || 0).toLocaleString();
-  $('creditsReconciliation').textContent = Number(credits.reconciliation || 0).toLocaleString();
-  $('creditOverviewNote').textContent = `Net Admin adjustments: ${Number(credits.adjustmentNet || 0).toLocaleString()} credits. A zero reconciliation means Admin allocations and adjustments equal license usage plus partner balances.`;
+  try {
+    const credits = (await loadAdminCreditSummary()).data;
+    $('creditsAllocated').textContent = Number(credits.allocated || 0).toLocaleString();
+    $('creditsUsed').textContent = Number(credits.used || 0).toLocaleString();
+    $('creditsHeld').textContent = Number(credits.held || 0).toLocaleString();
+    $('creditsTransferred').textContent = Number(credits.transferred || 0).toLocaleString();
+    $('creditsReconciliation').textContent = Number(credits.reconciliation || 0).toLocaleString();
+    $('creditOverviewNote').textContent = `Net Admin adjustments: ${Number(credits.adjustmentNet || 0).toLocaleString()} credits. A zero reconciliation means Admin allocations and adjustments equal license usage plus partner balances.`;
+  } catch {
+    for (const id of ['creditsAllocated','creditsUsed','creditsHeld','creditsTransferred','creditsReconciliation']) $(id).textContent = '—';
+    $('creditOverviewNote').textContent = 'Credit totals are temporarily unavailable. The rest of the Admin dashboard has loaded.';
+  }
   adminKeys = result.keys;
   renderAdminKeys();
   $('devicesBody').innerHTML = result.devices.map(d => `<tr><td>${escapeHtml(d.platform)}</td><td>${escapeHtml(d.appVersion)}</td><td>${escapeHtml(d.portalHost || '—')}</td><td>${d.lastSeen ? new Date(d.lastSeen).toLocaleString() : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No registered devices yet</td></tr>';
@@ -229,7 +249,7 @@ function formatDate(value) { return value ? new Date(value).toLocaleDateString()
 async function refreshProviderDashboard() {
   $('providerError').textContent = '';
   const data = (await providerDashboard()).data;
-  $('providerSummary').textContent = `${data.account.displayName || data.account.email} · ${data.account.credits} credits`;
+  $('providerSummary').textContent = `${data.customers.length} customer device${data.customers.length === 1 ? '' : 's'} · ${data.account.credits} credits`;
   $('partnerOverviewCredits').textContent = Number(data.account.credits || 0).toLocaleString();
   $('partnerOverviewCustomers').textContent = data.customers.length.toLocaleString();
   $('partnerOverviewActive').textContent = data.customers.filter(item => item.licenseState === 'active').length.toLocaleString();
@@ -289,10 +309,10 @@ $('showMorePartnerLicenses').addEventListener('click', () => { showAllPartnerLic
 $('refreshPartner').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
 $('createPartner').addEventListener('click', () => {
   if (!currentPartnerActor || !currentPartnerData) return;
-  const actor = currentPartnerActor, limits = currentPartnerData.limits || {};
+  const actor = currentPartnerActor, limits = currentPartnerData.limits || {}, rules = currentPartnerData.transferRules || {};
   const role = actor.role === 'admin' ? 'distributor' : actor.role === 'distributor' ? 'reseller' : 'provider';
-  const minimum = actor.role === 'admin' ? Number(limits.distributorMinCredits || 500) : actor.role === 'reseller' ? Number(limits.resellerToProviderMin || 20) : 0;
-  const maximum = actor.role === 'admin' ? null : actor.role === 'distributor' ? Math.min(actor.credits, Number(limits.distributorToResellerMax || 250)) : actor.credits;
+  const minimum = actor.role === 'admin' ? Number(limits.distributorMinCredits || 500) : actor.role === 'reseller' ? Number(rules.resellerToProviderMin || 20) : 0;
+  const maximum = actor.role === 'admin' ? null : actor.role === 'distributor' ? Math.min(actor.credits, Number(rules.distributorToResellerMax || 250)) : actor.credits;
   $('partnerAccountForm').reset();
   $('partnerAccountDialogTitle').textContent = `Create ${role}`;
   $('partnerCredits').min = String(minimum);
@@ -324,9 +344,11 @@ $('partnerAccountForm').addEventListener('submit', async event => {
 });
 $('creditTransferForm').addEventListener('submit', async event => {
   event.preventDefault();
-  const amount = Number($('creditTransferAmount').value), available = Number(currentPartnerActor?.credits || 0);
-  if (!transferTarget || !Number.isSafeInteger(amount) || amount < 1 || amount > available) {
-    $('creditTransferError').textContent = 'Enter a whole-number amount no greater than your available balance.'; return;
+  const amount = Number($('creditTransferAmount').value);
+  const minimum = Number($('creditTransferAmount').min || 1);
+  const maximum = Number($('creditTransferAmount').max || currentPartnerActor?.credits || 0);
+  if (!transferTarget || !Number.isSafeInteger(amount) || amount < minimum || amount > maximum) {
+    $('creditTransferError').textContent = `Enter a whole-number amount from ${minimum} to ${maximum} credits.`; return;
   }
   if (!confirm(`Transfer ${amount} credit${amount === 1 ? '' : 's'} to ${transferTarget.displayName}?`)) return;
   const submit = $('creditTransferForm').querySelector('[type="submit"]'); submit.disabled = true; $('creditTransferError').textContent = '';
@@ -381,6 +403,11 @@ $('partnerLimitsForm').addEventListener('submit', async event => {
 });
 
 $('refreshProvider').addEventListener('click', () => refreshProviderDashboard().catch(error => { $('providerError').textContent = friendlyError(error); }));
+$('pairCustomer').addEventListener('click', () => {
+  $('providerError').textContent = '';
+  $('pairingResult').textContent = '';
+  openDialog('pairCustomerDialog');
+});
 $('portalProfileForm').addEventListener('submit', async event => {
   event.preventDefault(); $('providerError').textContent = '';
   const name = $('profileName').value.trim(), portalUrl = $('profileUrl').value.trim(), expiryText = $('profileExpiry').value;
@@ -399,8 +426,10 @@ $('pairingForm').addEventListener('submit', async event => {
     const result = (await completePairing({ pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), durationYears: Number($('durationYears').value) })).data;
     const years = Number($('durationYears').value);
     const summary = result.existingLicense ? 'Device portal assignment updated; existing license retained.' : `Device paired for ${years} year${years === 1 ? '' : 's'}. ${years} credit${years === 1 ? '' : 's'} used; ${result.remainingCredits} credits remain.`;
-    $('pairingResult').innerHTML = `${escapeHtml(summary)}<br>Device ID: <code class="deviceReference">${escapeHtml(result.deviceId || '—')}</code><br>Portal MAC: <code>${escapeHtml(result.portalMac || 'Not provided by this app')}</code>`;
-    $('pairingForm').reset(); await refreshProviderDashboard(); await refreshDashboard();
+    $('pairingForm').reset();
+    closeDialog('pairCustomerDialog');
+    await refreshProviderDashboard(); await refreshDashboard();
+    $('providerError').textContent = summary;
   } catch (error) { $('pairingResult').textContent = friendlyError(error); }
 });
 
