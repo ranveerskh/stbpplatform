@@ -71,7 +71,7 @@ exports.adminCreateKey = onCall({ region }, async request => {
   if (expiresAtMillis !== null && (!Number.isFinite(expiresAtMillis) || expiresAtMillis <= Date.now())) fail('invalid-argument', 'Expiry must be a future date and time.');
   const key = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
   await keysRef.doc(hash(key)).set({ label, keyHint: key.slice(-4), active: true, deviceLimit,
-    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis), createdAt: stamp() });
+    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis), createdAt: stamp(), createdBy: request.auth.uid, createdByRole: 'admin' });
   return { key, keyHint: key.slice(-4), deviceLimit, expiresAt: expiresAtMillis };
 });
 
