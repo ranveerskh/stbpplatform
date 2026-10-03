@@ -59,39 +59,65 @@ async function refreshDashboard() {
   $('adminTools').classList.toggle('hidden', actor.role !== 'admin');
   setVisible('adminNav', actor.role === 'admin');
   setVisible('partnerPanel', actor.role !== 'provider');
-  setVisible('providerPanel', actor.role === 'provider');
+  setVisible('providerPanel', actor.role !== 'admin');
   if (actor.role === 'admin') showAdminTab(activeAdminTab);
-  if (actor.role === 'provider') await refreshProviderDashboard();
+  if (actor.role !== 'admin') await refreshProviderDashboard();
   if (actor.role === 'admin' && partnerData.limits) {
     for (const id of ['distributorMinCredits','distributorToResellerMax','resellerToProviderMin']) $(id).value = partnerData.limits[id];
   }
-  const rows = partnerData.accounts.map(a => {
-    const actions = [];
-    if (['distributor','reseller'].includes(actor.role) && ((actor.role === 'distributor' && a.role === 'reseller') || (actor.role === 'reseller' && a.role === 'provider'))) actions.push(`<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(a.uid)}">Transfer</button>`);
-    if (actor.role === 'admin') actions.push(`<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(a.uid)}">Adjust credits</button>`);
-    if (actor.role === 'admin' || actor.role === 'distributor') actions.push(`<button class="textButton" data-partner-action="role" data-uid="${escapeHtml(a.uid)}">Change role</button>`);
-    return `<tr><td>${escapeHtml(a.displayName)}</td><td>${escapeHtml(a.email)}</td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || '—')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${actions.join(' ') || '—'}</td></tr>`;
-  });
-  $('accountsBody').innerHTML = rows.join('') || '<tr><td colspan="7">No accounts to show</td></tr>';
-  $('accountsBody').onclick = async event => {
+  const allAccounts = partnerData.accounts;
+  const roleChoices = actor.role === 'admin' ? ['distributor','reseller','provider'] : ['reseller','provider'];
+  const parentChoices = (role, excludeUid = '') => {
+    if (role === 'distributor') return [{ uid:'', displayName:'Admin', role:'admin' }];
+    const required = role === 'reseller' ? 'distributor' : 'reseller';
+    const candidates = allAccounts.filter(item => item.uid !== excludeUid && item.role === required && (actor.role === 'admin' || item.parentUid === actor.uid || item.uid === actor.uid));
+    if (actor.role === required && !candidates.some(item => item.uid === actor.uid)) candidates.unshift({ uid:actor.uid, displayName:actor.displayName || actor.email, role:actor.role });
+    return candidates;
+  };
+  const roleOptions = account => roleChoices.map(role => `<option value="${role}" ${role === account.role ? 'selected' : ''}>${role}</option>`).join('');
+  const parentOptions = account => parentChoices(account.role, account.uid).map(parent => `<option value="${escapeHtml(parent.uid)}" ${parent.uid === account.parentUid ? 'selected' : ''}>${escapeHtml(parent.displayName)} · ${parent.role}</option>`).join('');
+  const canRoleChange = account => (actor.role === 'admin' && roleChoices.includes(account.role)) || (actor.role === 'distributor' && account.role !== 'distributor');
+  const manage = account => {
+    const canTransfer = (actor.role === 'distributor' && account.role === 'reseller') || (actor.role === 'reseller' && account.role === 'provider');
+    return `<div class="accountActions">${canTransfer ? `<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(account.uid)}">Transfer credits</button>` : ''}${actor.role === 'admin' ? `<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(account.uid)}">Adjust credits</button>` : ''}${canRoleChange(account) ? `<details class="roleEditor"><summary>Change role</summary><label>Role<select data-role-for="${escapeHtml(account.uid)}">${roleOptions(account)}</select></label><label>Parent<select data-parent-for="${escapeHtml(account.uid)}">${parentOptions(account)}</select></label><button class="ghost small" data-partner-action="role" data-uid="${escapeHtml(account.uid)}">Save role</button></details>` : ''}</div>`;
+  };
+  const details = account => {
+    const events = (partnerData.recentActivity || []).filter(item => item.fromUid === account.uid || item.toUid === account.uid || item.actorUid === account.uid).slice(0, 8);
+    const activity = events.map(item => `<li>${escapeHtml(activityLabel(item.type))} · ${item.amount} credit${item.amount === 1 ? '' : 's'} · ${escapeHtml(item.fromName)} → ${escapeHtml(item.toName)} <small>${escapeHtml(formatDate(item.createdAt))}</small></li>`).join('') || '<li>No recent account activity.</li>';
+    return `<details class="accountDetails"><summary>Details & activity</summary><div class="detailGrid"><span>Email</span><b>${escapeHtml(account.email)}</b><span>Parent</span><b>${escapeHtml(account.parentName || 'Admin')}</b><span>Created by</span><b>${escapeHtml(account.createdByName || '—')}</b><span>Created</span><b>${escapeHtml(formatDate(account.createdAt))}</b><span>Account ID</span><code>${escapeHtml(account.uid)}</code></div><ul class="activityList">${activity}</ul></details>`;
+  };
+  $('accountsBody').innerHTML = allAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
+  $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span><small>Created ${escapeHtml(formatDate(a.createdAt))}</small></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
+  $('accountsBody').onclick = $('accountsCards').onclick = async event => {
     const button = event.target.closest('[data-partner-action]'); if (!button) return;
     const account = partnerData.accounts.find(a => a.uid === button.dataset.uid); if (!account) return;
     try {
       if (button.dataset.partnerAction === 'transfer') {
-        const amount = Number(prompt(`Credits to transfer to ${account.displayName}:`, actor.role === 'reseller' ? '20' : '')); if (!Number.isSafeInteger(amount) || amount < 1) return;
+        const amount = Number(prompt(`Credits to transfer to ${account.displayName}. Available: ${actor.credits}:`, actor.role === 'reseller' ? '20' : '')); if (!Number.isSafeInteger(amount) || amount < 1) return;
         await transferCredits({ targetUid: account.uid, amount });
       } else if (button.dataset.partnerAction === 'adjust' && actor.role === 'admin') {
-        const delta = Number(prompt(`Credit adjustment for ${account.displayName}. Use a positive number to add or a negative number to remove:`, '500'));
-        if (!Number.isSafeInteger(delta) || delta === 0) return;
+        const delta = Number(prompt(`Credit adjustment for ${account.displayName}. Positive adds, negative removes.`, '')); if (!Number.isSafeInteger(delta) || delta === 0) return;
         await adjustPartnerCredits({ targetUid: account.uid, delta });
-      } else {
-        const newRole = prompt(`New role for ${account.displayName} (distributor, reseller, provider):`, account.role)?.trim().toLowerCase(); if (!newRole) return;
-        const parentInput = newRole === 'distributor' ? '' : prompt('Parent account UID (leave blank to keep current parent):', account.parentUid || '');
-        if (parentInput === null) return;
-        await changePartnerRole({ targetUid: account.uid, newRole, newParentUid: parentInput || undefined });
+      } else if (button.dataset.partnerAction === 'role') {
+        const row = button.closest('tr') || button.closest('.accountCard');
+        const newRole = row.querySelector(`[data-role-for="${CSS.escape(account.uid)}"]`)?.value;
+        const newParentUid = row.querySelector(`[data-parent-for="${CSS.escape(account.uid)}"]`)?.value || null;
+        if (!newRole || !confirm(`Change ${account.displayName} to ${newRole}?`)) return;
+        await changePartnerRole({ targetUid: account.uid, newRole, newParentUid });
       }
       await refreshDashboard();
     } catch(error) { alert(friendlyError(error)); }
+  };
+  $('accountsBody').onchange = $('accountsCards').onchange = event => {
+    const role = event.target.closest('[data-role-for]'); if (!role) return;
+    const uid = role.dataset.roleFor, row = role.closest('tr') || role.closest('.accountCard');
+    const parent = row.querySelector(`[data-parent-for="${CSS.escape(uid)}"]`);
+    if (role.value === 'distributor') parent.innerHTML = '<option value="">Admin</option>';
+    else {
+      const required = role.value === 'reseller' ? 'distributor' : 'reseller';
+      const candidates = parentChoices(role.value, uid);
+      parent.innerHTML = candidates.map(item => `<option value="${escapeHtml(item.uid)}" ${item.uid === partnerData.accounts.find(a=>a.uid===uid)?.parentUid ? 'selected' : ''}>${escapeHtml(item.displayName)} · ${item.role}</option>`).join('');
+    }
   };
 
   if (actor.role !== 'admin') return;
@@ -104,7 +130,7 @@ async function refreshDashboard() {
   $('active30d').textContent = result.appUsage?.active30d ?? 0;
   $('androidCount').textContent = result.platformCounts.android;
   $('windowsCount').textContent = result.platformCounts.windows;
-  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${k.expired||!k.active?'off':'on'}">${k.expired?'Expired':k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
+  $('keysBody').innerHTML = result.keys.map(k => `<tr><td>${escapeHtml(k.label || '—')}<details class="accountDetails"><summary>Key details</summary><small>Created by: ${escapeHtml(k.createdByRole || 'Admin')}<br>${escapeHtml(k.createdBy || 'Admin')}<br>Created: ${escapeHtml(formatDate(k.createdAt))}</small></details></td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${k.expired||!k.active?'off':'on'}">${k.expired?'Expired':k.active?'Active':'Disabled'}</span></td><td><button class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active?'Disable':'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
   $('devicesBody').innerHTML = result.devices.map(d => `<tr><td>${escapeHtml(d.platform)}</td><td>${escapeHtml(d.appVersion)}</td><td>${escapeHtml(d.portalHost || '—')}</td><td>${d.lastSeen ? new Date(d.lastSeen).toLocaleString() : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No registered devices yet</td></tr>';
   for (const id of ['androidMinimumVersion','windowsMinimumVersion','androidUpdateUrl','windowsUpdateUrl']) $(id).value = result.settings[id] || '';
   document.querySelectorAll('[data-key]').forEach(button => button.addEventListener('click', async () => {
@@ -125,7 +151,7 @@ async function refreshAdminProviderDashboard() {
   const data = (await adminProviderDashboard()).data;
   $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
   const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
-  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.providerEmail)}</small></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · disabled'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
+  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Key details</summary><small>Created by account: ${escapeHtml(customer.createdBy || customer.providerName)}<br>License ID: ${escapeHtml(customer.licenseId)}</small></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · disabled'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
   $('adminCustomersBody').onclick = async event => {
     const button = event.target.closest('[data-admin-license]'); if (!button) return;
     const active = button.dataset.active !== 'true';
@@ -136,6 +162,8 @@ async function refreshAdminProviderDashboard() {
   };
 }
 
+function activityLabel(type) { return ({transfer:'Credit transfer',admin_allocation:'Admin allocation',admin_adjustment:'Admin adjustment',license_issued:'Customer license activated',license_renewal:'License renewed'})[type] || type; }
+function customerLabelForDevice(deviceRef, customers) { return customers.find(item => item.deviceRef === deviceRef)?.customerLabel || 'customer'; }
 function formatDate(value) { return value ? new Date(value).toLocaleDateString() : 'Not set'; }
 async function refreshProviderDashboard() {
   $('providerError').textContent = '';
@@ -164,9 +192,11 @@ async function refreshProviderDashboard() {
   }).join('') || '<tr><td colspan="9">No customer devices assigned yet</td></tr>';
   $('customersBody').onclick = async event => {
     const button = event.target.closest('[data-renew-device]'); if (!button) return;
-    if (!confirm('Use 1 credit to renew this customer app license for 12 months?')) return;
+    const years = Number(prompt(`License renewal for ${customerLabelForDevice(button.dataset.renewDevice, data.customers)}: choose 1–10 years. Each year uses 1 credit. Available: ${data.account.credits}.`, '1'));
+    if (!Number.isSafeInteger(years) || years < 1 || years > 10) return;
+    if (!confirm(`Use ${years} credit${years === 1 ? '' : 's'} to renew for ${years} year${years === 1 ? '' : 's'}?`)) return;
     button.disabled = true;
-    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice })).data; alert(`License renewed until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`); await refreshProviderDashboard(); await refreshDashboard(); }
+    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice, years })).data; alert(`License renewed until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`); await refreshProviderDashboard(); await refreshDashboard(); }
     catch (error) { alert(friendlyError(error)); button.disabled = false; }
   };
 }
@@ -184,7 +214,7 @@ $('createPartner').addEventListener('click', async () => {
   const actor = result.data.account, displayName = prompt('Account name:')?.trim(); if (!displayName) return;
   const email = prompt('Account email:')?.trim(); if (!email) return;
   const defaultCredits = actor.role === 'admin' ? '500' : actor.role === 'distributor' ? '20' : '20';
-  const credits = Number(prompt('Opening credit allocation:', defaultCredits));
+  const credits = Number(prompt(`Opening credits to allocate (you have ${actor.credits}):`, defaultCredits));
   if (!Number.isSafeInteger(credits) || credits < 0) { alert('Enter a whole number of credits.'); return; }
   try {
     const callable = actor.role === 'admin' ? createDistributor : createPartnerChild;
@@ -239,8 +269,9 @@ $('pairingForm').addEventListener('submit', async event => {
   const pairingCode = $('pairingCode').value.trim().toUpperCase(), profileId = $('pairingProfile').value;
   if (!profileId) { $('pairingResult').textContent = 'Create an active portal profile first.'; return; }
   try {
-    const result = (await completePairing({ pairingCode, profileId, customerLabel: $('customerLabel').value.trim() })).data;
-    const summary = result.existingLicense ? 'Device portal assignment updated; existing license retained.' : `Device paired. 1 credit used; ${result.remainingCredits} credits remain.`;
+    const result = (await completePairing({ pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), durationYears: Number($('durationYears').value) })).data;
+    const years = Number($('durationYears').value);
+    const summary = result.existingLicense ? 'Device portal assignment updated; existing license retained.' : `Device paired for ${years} year${years === 1 ? '' : 's'}. ${years} credit${years === 1 ? '' : 's'} used; ${result.remainingCredits} credits remain.`;
     $('pairingResult').innerHTML = `${escapeHtml(summary)}<br>Device ID: <code class="deviceReference">${escapeHtml(result.deviceId || '—')}</code><br>Portal MAC: <code>${escapeHtml(result.portalMac || 'Not provided by this app')}</code>`;
     $('pairingForm').reset(); await refreshProviderDashboard(); await refreshDashboard();
   } catch (error) { $('pairingResult').textContent = friendlyError(error); }
