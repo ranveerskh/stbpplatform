@@ -81,9 +81,11 @@ function validatePortalUrl(value) {
 function publicAssignment(data, profile) {
   const expiresAt = data.expiresAt?.toDate?.().getTime?.() || null;
   const graceUntil = data.graceUntil?.toDate?.().getTime?.() || null;
+  const trialUntil = data.trialUntil?.toDate?.().getTime?.() || null;
   const now = Date.now();
   const expired = expiresAt !== null && expiresAt <= now;
   const inGrace = expired && graceUntil !== null && graceUntil > now;
+  const inTrial = data.trial === true && trialUntil !== null && trialUntil > now;
   return {
     registered: true,
     licenseLabel: cleanText(data.label, 100) || 'STB Play license',
@@ -91,6 +93,9 @@ function publicAssignment(data, profile) {
     graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
     licenseExpired: expired && !inGrace,
     inGrace,
+    trial: data.trial === true,
+    trialExpiresAt: trialUntil ? new Date(trialUntil).toISOString() : null,
+    trialExpired: data.trial === true && !inTrial,
     portal: profile ? {
       name: cleanText(profile.name, 100),
       url: profile.portalUrl,
@@ -230,7 +235,7 @@ const callables = {
         return { uid, displayName: cleanText(data.displayName, 100), email: cleanText(data.email, 254),
           role: data.role, parentUid: data.parentUid || null,
           parentName: data.parentUid ? accountNames.get(data.parentUid) || 'Parent account' : 'Admin', credits: integer(data.credits, 0),
-          active: data.active === true, createdAt: data.createdAt?.toDate?.().toISOString?.() || null, createdByUid: data.createdBy || null,
+          active: data.active === true, archived: data.archived === true, archivedAt: data.archivedAt?.toDate?.().toISOString?.() || null, createdAt: data.createdAt?.toDate?.().toISOString?.() || null, createdByUid: data.createdBy || null,
           createdByRole: cleanText(data.createdByRole, 30),
           createdByName: data.createdBy ? (cleanText(data.createdByName, 100) || accountNames.get(data.createdBy) || (data.createdBy === actor.uid ? cleanText(actor.displayName, 100) : 'Admin')) : '—',
           createdByEmail: cleanText(data.createdByEmail, 254),
@@ -257,6 +262,86 @@ const callables = {
       reconciliation: allocated + signedAdjustment - used - held };
   }),
 
+  partnerArchiveAccount: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    const targetUid = cleanText(request.data?.targetUid, 128);
+    const archived = request.data?.archived === true;
+    if (!targetUid || targetUid === actor.uid) fail('invalid-argument', 'Choose another account to archive or restore.');
+    const ref = accounts.doc(targetUid);
+    let targetRole;
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) fail('not-found', 'Partner account was not found.');
+      const target = snap.data(); targetRole = cleanText(target.role, 30);
+      if (!accountRoles.has(targetRole)) fail('failed-precondition', 'This record is not an active partner account.');
+      const permittedParentRole = { reseller: 'distributor', provider: 'reseller' }[targetRole];
+      const isDirectParent = target.parentUid === actor.uid && actor.role === permittedParentRole;
+      if (actor.role !== 'admin' && !isDirectParent) fail('permission-denied', 'You can archive only an account directly under you.');
+      if (target.archived === archived) return;
+      if (archived) {
+        const [children, customerRows] = await Promise.all([
+          tx.get(accounts.where('parentUid', '==', targetUid)),
+          tx.get(assignments.where('ownerUid', '==', targetUid))
+        ]);
+        if (!children.empty) fail('failed-precondition', 'This account has child accounts. Move or archive those accounts first.');
+        if (customerRows.docs.some(row => row.data().archived !== true)) fail('failed-precondition', 'This account still has customers. Archive those customers first.');
+        if (integer(target.credits, -1) !== 0) fail('failed-precondition', 'The account must have 0 credits before it can be archived. Transfer or record an Admin credit adjustment first; balances are never discarded.');
+        tx.update(ref, { active: false, archived: true, archivedAt: stamp(), archivedBy: actor.uid, updatedAt: stamp() });
+      } else {
+        let currentParentRole = 'admin';
+        if (target.parentUid) {
+          const parent = await tx.get(accounts.doc(target.parentUid));
+          if (!parent.exists || parent.data().active !== true || parent.data().archived === true) fail('failed-precondition', 'Restore the parent account first.');
+          currentParentRole = cleanText(parent.data().role, 30);
+        }
+        if (parentRole[targetRole] !== currentParentRole) fail('failed-precondition', `A ${targetRole} account must remain under a ${parentRole[targetRole]}.`);
+        tx.update(ref, { active: true, archived: false, archivedAt: FieldValue.delete(), archivedBy: FieldValue.delete(), updatedAt: stamp() });
+      }
+    });
+    await auth.updateUser(targetUid, { disabled: archived });
+    await auditEvent(actor.uid, archived ? 'partner_account_archived' : 'partner_account_restored', targetUid, { role: targetRole });
+    return { updated: true, archived };
+  }),
+
+  partnerArchiveCustomer: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (actor.role !== 'admin' && !accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
+    const deviceRefId = cleanText(request.data?.deviceRef, 128);
+    const archived = request.data?.archived === true;
+    if (!deviceRefId) fail('invalid-argument', 'Choose a customer device.');
+    const assignmentRef = assignments.doc(deviceRefId);
+    let details;
+    await db.runTransaction(async tx => {
+      const assignmentSnap = await tx.get(assignmentRef);
+      if (!assignmentSnap.exists) fail('not-found', 'Customer assignment was not found.');
+      const assignment = assignmentSnap.data();
+      if (actor.role !== 'admin' && assignment.ownerUid !== actor.uid) fail('permission-denied', 'You can manage customers assigned to your own account only.');
+      if (assignment.archived === archived) { details = assignment; return; }
+      const keyRef = registrationKeys.doc(cleanText(assignment.licenseId, 128));
+      const keySnap = await tx.get(keyRef);
+      const deviceDocs = keySnap.exists ? await tx.get(keyRef.collection('devices')) : null;
+      const key = keySnap.exists ? keySnap.data() : {};
+      if (archived) {
+        tx.update(assignmentRef, { archived: true, archivedAt: stamp(), archivedBy: actor.uid,
+          archivedAssignmentActive: assignment.active === true, active: false, updatedAt: stamp() });
+        if (keySnap.exists) tx.update(keyRef, { archived: true, archivedAt: stamp(), archivedBy: actor.uid,
+          archivedLicenseActive: key.active === true, active: false });
+        deviceDocs?.docs.forEach(device => tx.update(device.ref, { active: false }));
+      } else {
+        tx.update(assignmentRef, { archived: false, archivedAt: FieldValue.delete(), archivedBy: FieldValue.delete(),
+          active: assignment.archivedAssignmentActive === true, archivedAssignmentActive: FieldValue.delete(), updatedAt: stamp() });
+        if (keySnap.exists) tx.update(keyRef, { archived: false, archivedAt: FieldValue.delete(), archivedBy: FieldValue.delete(),
+          active: key.archivedLicenseActive === true, archivedLicenseActive: FieldValue.delete() });
+        deviceDocs?.docs.forEach(device => tx.update(device.ref, { active: key.archivedLicenseActive === true }));
+      }
+      details = assignment;
+    });
+    if (!details) fail('not-found', 'Customer assignment was not found.');
+    await auditEvent(actor.uid, archived ? 'customer_archived' : 'customer_restored', deviceRefId,
+      { customerLabel: cleanText(details.customerLabel, 100), licenseId: cleanText(details.licenseId, 128) });
+    return { updated: true, archived };
+  }),
+
   partnerProviderDashboard: onCall({ region }, async request => {
     const actor = await requireActor(request);
     if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
@@ -276,19 +361,21 @@ const callables = {
       const graceUntil = key.graceUntil?.toDate?.().getTime?.() || null;
       const now = Date.now();
       const inGrace = !!expiresAt && expiresAt <= now && !!graceUntil && graceUntil > now;
+      const inTrial = key.trial === true && !!key.trialUntil?.toDate?.().getTime?.() && key.trialUntil.toDate().getTime() > now;
       return {
         deviceRef: doc.id,
-        deviceId: doc.id,
+        deviceId: doc.id, archived: assignment.archived === true,
         licenseId: cleanText(assignment.licenseId, 128),
         keyHint: cleanText(key.keyHint, 4),
         createdByName: cleanText(key.createdByName, 100) || cleanText(actor.displayName, 100) || 'You',
-        durationYears: Math.max(1, Math.round(integer(key.durationMonths, 12) / 12)),
+        durationYears: key.trial === true ? 0 : Math.max(1, Math.round(integer(key.durationMonths, 12) / 12)),
         portalMac: cleanText(assignment.portalMac, 17).toUpperCase(),
         customerLabel: cleanText(assignment.customerLabel, 100) || 'Customer device',
         platform: cleanText(assignment.platform, 20), active: assignment.active === true && key.active === true,
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
-        licenseState: !keySnap.exists || key.active !== true ? 'disabled' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
+        trial: key.trial === true, trialExpiresAt: key.trialUntil?.toDate?.().toISOString?.() || null,
+        licenseState: !keySnap.exists || key.active !== true ? 'disabled' : inTrial ? 'trial' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
         portalName: cleanText(profile?.name, 100) || 'Unavailable profile', portalProfileId: cleanText(assignment.portalProfileId, 128),
         portalExpiresAt: profile?.expiresAt?.toDate?.().toISOString?.() || null,
         portalActive: portalProfileIsActive(profile),
@@ -335,11 +422,13 @@ const callables = {
       const expiresAt = key.expiresAt?.toDate?.().getTime?.() || null;
       const graceUntil = key.graceUntil?.toDate?.().getTime?.() || null;
       const inGrace = !!expiresAt && expiresAt <= now && !!graceUntil && graceUntil > now;
+      const inTrial = key.trial === true && !!key.trialUntil?.toDate?.().getTime?.() && key.trialUntil.toDate().getTime() > now;
       const enabled = row.active === true && key.active === true;
       let portalHost = '';
       try { portalHost = new URL(profile.portalUrl).hostname; } catch {}
       return {
         customerLabel: cleanText(row.customerLabel, 100) || 'Customer device',
+        deviceRef: row.id, archived: row.archived === true, ownerUid: cleanText(row.ownerUid, 128),
         deviceId: row.id,
         portalMac: cleanText(row.portalMac, 17).toUpperCase(),
         providerName: cleanText(provider.displayName, 100) || 'Partner account',
@@ -350,7 +439,8 @@ const callables = {
         createdByName: cleanText(key.createdByName, 100) || cleanText(provider.displayName, 100) || 'Partner account',
         createdByEmail: cleanText(key.createdByEmail, 254) || cleanText(provider.email, 254),
         licenseId: cleanText(row.licenseId, 128), active: enabled,
-        licenseState: !key.active || row.active !== true ? 'disabled' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
+        trial: key.trial === true, trialExpiresAt: key.trialUntil?.toDate?.().toISOString?.() || null,
+        licenseState: !key.active || row.active !== true ? 'disabled' : inTrial ? 'trial' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         portalName: cleanText(profile.name, 100) || 'Unavailable profile', portalHost,
         portalActive: portalProfileIsActive(profile),
@@ -621,11 +711,14 @@ const callables = {
       const start = Math.max(now, oldExpiry), expiresAtMillis = addMonthsUtc(start, years * 12);
       const graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
       tx.update(accounts.doc(actor.uid), { credits: balance - years, updatedAt: stamp() });
-      tx.update(keyRef, { expiresAt: Timestamp.fromMillis(expiresAtMillis),
-        graceUntil: Timestamp.fromMillis(graceUntilMillis), renewedAt: stamp(), renewedBy: actor.uid,
+      const convertingTrial = keySnap.data().trial === true;
+      const licenseExpiry = convertingTrial ? addMonthsUtc(now, years * 12) : expiresAtMillis;
+      const licenseGrace = licenseExpiry + 7 * 24 * 60 * 60 * 1000;
+      tx.update(keyRef, { trial: false, trialUntil: FieldValue.delete(), expiresAt: Timestamp.fromMillis(licenseExpiry),
+        graceUntil: Timestamp.fromMillis(licenseGrace), renewedAt: stamp(), renewedBy: actor.uid,
         durationMonths: integer(keySnap.data().durationMonths, 12) + years * 12 });
-      tx.create(ledgerRef, { type: 'license_renewal', fromUid: actor.uid, toUid: deviceHash, amount: years, durationYears: years, actorUid: actor.uid, createdAt: stamp() });
-      renewal = { expiresAt: new Date(expiresAtMillis).toISOString(), graceUntil: new Date(graceUntilMillis).toISOString(), remainingCredits: balance - years, durationYears: years };
+      tx.create(ledgerRef, { type: convertingTrial ? 'license_issued' : 'license_renewal', fromUid: actor.uid, toUid: deviceHash, amount: years, durationYears: years, actorUid: actor.uid, createdAt: stamp() });
+      renewal = { expiresAt: new Date(licenseExpiry).toISOString(), graceUntil: new Date(licenseGrace).toISOString(), remainingCredits: balance - years, durationYears: years, activatedFromTrial: convertingTrial };
     });
     await auditEvent(actor.uid, 'device_license_renewed', assignment.licenseId, { deviceHash });
     return { renewed: true, ...renewal };
@@ -662,8 +755,9 @@ async function completePairing(request) {
   const code = cleanText(request.data?.pairingCode, 20).toUpperCase();
   const profileId = cleanText(request.data?.profileId, 128);
   const label = cleanText(request.data?.customerLabel, 100) || 'Customer device';
+  const trial = request.data?.trial === true;
   const durationYears = integer(request.data?.durationYears, -1);
-  if (durationYears < 1 || durationYears > 10) fail('invalid-argument', 'Choose a license term from 1 to 10 years.');
+  if (!trial && (durationYears < 1 || durationYears > 10)) fail('invalid-argument', 'Choose a license term from 1 to 10 years.');
   if (!/^[A-F0-9]{12}$/.test(code) || !profileId) fail('invalid-argument', 'Enter the pairing code and select a portal profile.');
   const codeRef = pairingCodes.doc(sha256(code)), profileRef = portalProfiles.doc(profileId), ownerRef = accounts.doc(partnerUid);
   const licenseKey = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
@@ -695,18 +789,24 @@ async function completePairing(request) {
         platform: pairing.platform, portalMac: portalMac || null, customerLabel: label, providerName: cleanText(owner.displayName, 100), updatedAt: stamp() });
       result = { existingLicense: true, creditsUsed: 0, remainingCredits: integer(owner.credits, 0) };
     } else {
+      if (trial && assignmentSnap.exists) fail('failed-precondition', 'This device has already been paired. A 7-day trial is available only once per device; choose a paid license instead.');
       const balance = integer(owner.credits, 0);
-      if (balance < durationYears) {
+      if (!trial && balance < durationYears) {
         const subject = actor.role === 'admin' ? `${cleanText(owner.displayName, 100) || 'The selected partner'} needs` : 'You need';
         fail('failed-precondition', `${subject} ${durationYears} credits to activate this device for ${durationYears} year${durationYears === 1 ? '' : 's'}.`);
       }
-      const activatedAtMillis = Date.now(), expiresAtMillis = addMonthsUtc(activatedAtMillis, durationYears * 12), graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
+      const activatedAtMillis = Date.now(), trialUntilMillis = trial ? activatedAtMillis + 7 * 24 * 60 * 60 * 1000 : null;
+      const expiresAtMillis = trial ? trialUntilMillis : addMonthsUtc(activatedAtMillis, durationYears * 12);
+      const graceUntilMillis = trial ? null : expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
       expiresAt = Timestamp.fromMillis(expiresAtMillis);
-      graceUntil = Timestamp.fromMillis(graceUntilMillis);
+      graceUntil = graceUntilMillis ? Timestamp.fromMillis(graceUntilMillis) : null;
       licenseId = keyRef.id;
-      tx.update(ownerRef, { credits: balance - durationYears, updatedAt: stamp() });
-      tx.create(ledgerRef, { type: 'license_issued', fromUid: partnerUid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
-      tx.create(keyRef, { label, keyHint: licenseKey.slice(-4), active: true, deviceLimit: 1, ownerUid: partnerUid, ownerRole: owner.role, durationMonths: durationYears * 12,
+      if (!trial) {
+        tx.update(ownerRef, { credits: balance - durationYears, updatedAt: stamp() });
+        tx.create(ledgerRef, { type: 'license_issued', fromUid: partnerUid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
+      }
+      tx.create(keyRef, { label, keyHint: licenseKey.slice(-4), active: true, deviceLimit: 1, ownerUid: partnerUid, ownerRole: owner.role, durationMonths: trial ? 0 : durationYears * 12,
+        trial, trialUntil: trial ? Timestamp.fromMillis(trialUntilMillis) : null,
         activatedAt: Timestamp.fromMillis(activatedAtMillis), expiresAt, graceUntil,
         createdAt: stamp(), createdBy: actor.uid, createdByName: creatorName,
         createdByEmail: creatorEmail, portalProfileId: profileId });
@@ -714,13 +814,13 @@ async function completePairing(request) {
         deviceTokenHash: pairing.deviceTokenHash, platform: pairing.platform, portalMac: portalMac || null, customerLabel: label,
         providerName: cleanText(owner.displayName, 100), active: true, createdAt: stamp(), updatedAt: stamp(), lastSyncedAt: stamp(), createdBy: actor.uid });
       tx.create(keyRef.collection('devices').doc(pairing.deviceHash), { active: true, platform: pairing.platform,
-        registeredAt: stamp(), lastSeen: stamp(), deleteAt: Timestamp.fromMillis(graceUntilMillis) });
-      result = { existingLicense: false, creditsUsed: durationYears, remainingCredits: balance - durationYears, durationYears };
+        registeredAt: stamp(), lastSeen: stamp(), deleteAt: Timestamp.fromMillis((graceUntilMillis || trialUntilMillis) + 365 * 24 * 60 * 60 * 1000) });
+      result = { existingLicense: false, trial, trialDays: trial ? 7 : undefined, creditsUsed: trial ? 0 : durationYears, remainingCredits: trial ? balance : balance - durationYears, durationYears: trial ? 0 : durationYears };
     }
     tx.update(codeRef, { state: 'completed', providerUid: partnerUid, ownerUid: partnerUid, pairedByUid: actor.uid, profileId, assignmentId: pairing.deviceHash,
       licenseId, completedAt: stamp() });
     result = { ...result, deviceId: pairing.deviceHash, portalMac: portalMac || null, licenseId, expiresAt: expiresAt?.toDate?.().toISOString?.() || null,
-      graceUntil: graceUntil?.toDate?.().toISOString?.() || null, ownerUid: partnerUid, ownerRole: owner.role,
+      graceUntil: graceUntil?.toDate?.().toISOString?.() || null, trial, trialExpiresAt: trial ? expiresAt.toDate().toISOString() : null, ownerUid: partnerUid, ownerRole: owner.role,
       ownerName: cleanText(owner.displayName, 100) };
   });
   await auditEvent(actor.uid, 'device_paired', result.licenseId, { profileId, ownerUid: partnerUid, existingLicense: result.existingLicense });
@@ -743,6 +843,7 @@ async function getPairingStatus(req, res) {
   if (data.deviceHash !== sha256(deviceId)) return res.status(403).json({ error: 'Device does not match pairing request.' });
   const [keySnap, profileSnap] = await Promise.all([registrationKeys.doc(data.licenseId).get(), portalProfiles.doc(data.portalProfileId).get()]);
   if (!keySnap.exists || !profileSnap.exists || !portalProfileIsActive(profileSnap.data())) return res.status(403).json({ error: 'License or portal assignment is unavailable.' });
+  if (keySnap.data().trial === true && keySnap.data().trialUntil?.toMillis?.() <= Date.now()) return res.status(403).json({ registered: false, error: 'The 7-day app trial has ended. Ask your partner to activate a license.', code: 'trial_expired' });
   return res.status(200).json({ state: 'completed', ...publicAssignment(keySnap.data(), profileSnap.data()) });
 }
 
@@ -772,6 +873,7 @@ async function syncDevice(req, res) {
   const data = snap.data();
   const [keySnap, profileSnap, cfgSnap] = await Promise.all([registrationKeys.doc(data.licenseId).get(), portalProfiles.doc(data.portalProfileId).get(), settingsRef.get()]);
   if (!keySnap.exists || keySnap.data().active !== true || !profileSnap.exists || !portalProfileIsActive(profileSnap.data())) return res.status(403).json({ registered: false, error: 'License or portal assignment is unavailable.', code: 'license_invalid' });
+  if (keySnap.data().trial === true && keySnap.data().trialUntil?.toMillis?.() <= Date.now()) return res.status(403).json({ registered: false, error: 'The 7-day app trial has ended. Ask your partner to activate a license.', code: 'trial_expired' });
   await assignmentRef.update({ lastSyncedAt: stamp() });
   const cfg = cfgSnap.exists ? cfgSnap.data() : {};
   const minimumVersion = cfg[`${platform}MinimumVersion`] || '1.0.0';

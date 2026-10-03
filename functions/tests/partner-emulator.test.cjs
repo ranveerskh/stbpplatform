@@ -188,6 +188,57 @@ async function test() {
   assert.equal(adminProviderCustomer.parentName, reseller.name);
   assert.equal(adminProviderCustomer.parentUid, reseller.uid);
 
+  const customerLedgerBeforeArchive = (await db.collection('creditLedger').get()).size;
+  await expectCallableError(invoke('partnerArchiveCustomer', distributor.token, { deviceRef: providerPairing.deviceHash, archived: true }), 'own account only');
+  await invoke('partnerArchiveCustomer', provider.token, { deviceRef: providerPairing.deviceHash, archived: true });
+  assert.equal((await db.collection('deviceAssignments').doc(providerPairing.deviceHash).get()).data().active, false);
+  assert.equal((await providerKeyRef.get()).data().archived, true);
+  assert.equal((await db.collection('creditLedger').get()).size, customerLedgerBeforeArchive, 'Archiving customer records never changes credits or ledger history.');
+  assert.equal((await invoke('partnerProviderDashboard', provider.token)).customers[0].archived, true);
+  await invoke('partnerArchiveCustomer', provider.token, { deviceRef: providerPairing.deviceHash, archived: false });
+  assert.equal((await db.collection('deviceAssignments').doc(providerPairing.deviceHash).get()).data().active, true);
+  assert.equal((await syncDevice(providerPairing)).portal.name, 'Provider One A');
+
+  const trialPairing = await seedPairing('free-trial-customer');
+  const providerCreditsBeforeTrial = (await account(provider.uid)).credits;
+  const trialResult = await invoke('partnerCompletePairing', provider.token, {
+    pairingCode: trialPairing.pairingCode, profileId: providerPortalA.profileId, customerLabel: 'Free Trial', trial: true
+  });
+  assert.equal(trialResult.trial, true);
+  assert.equal(trialResult.creditsUsed, 0);
+  assert.equal(trialResult.trialDays, 7);
+  assert.equal((await account(provider.uid)).credits, providerCreditsBeforeTrial, 'Pairing a trial uses no partner credits.');
+  const trialKeyRef = db.collection('registrationKeys').doc(trialResult.licenseId);
+  const trialKey = (await trialKeyRef.get()).data();
+  assert.equal(trialKey.trial, true);
+  assert.equal(trialKey.graceUntil, null, 'The seven-day trial is separate from the seven-day post-license grace period.');
+  assert(Math.abs((trialKey.trialUntil.toMillis() - trialKey.activatedAt.toMillis()) - 7 * 24 * 60 * 60 * 1000) < 5000);
+  assert.equal((await syncDevice(trialPairing)).trial, true, 'The app receives active trial status during the seven-day period.');
+  assert(!(await db.collection('creditLedger').where('toUid', '==', trialPairing.deviceHash).get()).size, 'Free trial pairing creates no credit ledger entry.');
+  await trialKeyRef.update({ trialUntil: Timestamp.fromMillis(Date.now() - 1000), expiresAt: Timestamp.fromMillis(Date.now() - 1000) });
+  const expiredTrialSync = await postJson(`http://${functionsHost}/${projectId}/${region}/appApi/api/device/sync`,
+    { deviceId: trialPairing.deviceId, deviceToken: trialPairing.deviceToken, platform: 'android', appVersion: '2.0.2' });
+  assert.equal(expiredTrialSync.response.status, 403);
+  assert.equal(expiredTrialSync.payload.code, 'trial_expired');
+  const providerCreditsBeforeTrialActivation = (await account(provider.uid)).credits;
+  const activateTrial = await invoke('partnerRenewDeviceLicense', provider.token, { deviceRef: trialPairing.deviceHash, years: 2 });
+  assert.equal(activateTrial.activatedFromTrial, true);
+  assert.equal((await account(provider.uid)).credits, providerCreditsBeforeTrialActivation - 2);
+  const paidTrialKey = (await trialKeyRef.get()).data();
+  assert.equal(paidTrialKey.trial, false);
+  assert(Math.abs(paidTrialKey.expiresAt.toMillis() - addMonthsUtc(Date.now(), 24)) < 5000);
+  assert.equal(paidTrialKey.graceUntil.toMillis(), paidTrialKey.expiresAt.toMillis() + 7 * 24 * 60 * 60 * 1000);
+  assert.equal((await syncDevice(trialPairing)).trial, false, 'The app sync reports paid license status after trial activation.');
+  const trialLedger = (await db.collection('creditLedger').where('toUid', '==', trialPairing.deviceHash).get()).docs.map(doc => doc.data());
+  assert.equal(trialLedger.length, 1);
+  assert.equal(trialLedger[0].amount, 2);
+  await invoke('partnerArchiveCustomer', provider.token, { deviceRef: trialPairing.deviceHash, archived: true });
+  const attemptedRepeatTrial = await seedPairing('repeat-trial-same-device', trialPairing.deviceId);
+  await expectCallableError(invoke('partnerCompletePairing', provider.token, {
+    pairingCode: attemptedRepeatTrial.pairingCode, profileId: providerPortalA.profileId, customerLabel: 'Repeat Trial', trial: true
+  }), 'only once per device');
+  await invoke('partnerArchiveCustomer', provider.token, { deviceRef: trialPairing.deviceHash, archived: false });
+
   await invoke('partnerSwitchDevicePortal', provider.token, { deviceRef: providerPairing.deviceHash, profileId: providerPortalB.profileId });
   const syncedProvider = await syncDevice(providerPairing);
   assert.equal(syncedProvider.portal.url, `https://b-provider-one.example.test/service`);
@@ -368,7 +419,28 @@ async function test() {
   assert.equal(manualKeyRow.createdByEmail, adminUser.email);
   assert(manualKeyRow.createdByName, 'Admin key creator has a readable name or email.');
 
-  console.log('PASS: role scope/parent rules, child-role blocking, atomic concurrent transfers, partner pairing and portal switching, 1–10 year expiry/renewal, seven-day grace, ledger attribution, and customer sync.');
+  await expectCallableError(invoke('adminArchiveKey', distributor.token, { keyId: manualKeyRow.id, archived: true }), 'Admin access is required');
+  await invoke('adminArchiveKey', adminUser.token, { keyId: manualKeyRow.id, archived: true });
+  assert.equal((await db.collection('registrationKeys').doc(manualKeyRow.id).get()).data().archived, true);
+  await expectCallableError(invoke('adminSetKeyStatus', adminUser.token, { keyId: manualKeyRow.id, active: true }), 'Restore this key before changing');
+  await invoke('adminArchiveKey', adminUser.token, { keyId: manualKeyRow.id, archived: false });
+  assert.equal((await db.collection('registrationKeys').doc(manualKeyRow.id).get()).data().archived, false);
+
+  await expectCallableError(invoke('partnerArchiveAccount', adminUser.token, { targetUid: distributor.uid, archived: true }), 'child accounts');
+  assert.equal((await account(distributor.uid)).archived, undefined, 'Accounts with children cannot be archived.');
+  const emptyDistResult = await invoke('adminCreateDistributor', adminUser.token, {
+    displayName: 'Archive Demo Distributor', email: 'archive-demo-distributor@example.test', credits: 500
+  });
+  const emptyDist = await signInPartner(emptyDistResult.uid, 'archive-demo-distributor@example.test', 'Archive Demo Distributor');
+  await invoke('adminAdjustPartnerCredits', adminUser.token, { targetUid: emptyDist.uid, delta: -500 });
+  assert.equal((await account(emptyDist.uid)).credits, 0);
+  await invoke('partnerArchiveAccount', adminUser.token, { targetUid: emptyDist.uid, archived: true });
+  assert.equal((await account(emptyDist.uid)).archived, true);
+  await expectCallableError(invoke('partnerListDashboard', emptyDist.token), 'active partner account');
+  await invoke('partnerArchiveAccount', adminUser.token, { targetUid: emptyDist.uid, archived: false });
+  assert.equal((await invoke('partnerListDashboard', emptyDist.token)).account.role, 'distributor');
+
+  console.log('PASS: role scope/parent rules, child-role blocking, atomic concurrent transfers, pairing, free 7-day trial and paid conversion, portal switching, 1–10 year expiry/renewal, grace period, safe archive/restore, ledger attribution, and customer sync.');
 }
 
 test().catch(error => {

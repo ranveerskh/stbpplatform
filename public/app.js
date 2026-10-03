@@ -6,6 +6,9 @@ const $ = id => document.getElementById(id);
 const listDashboard = httpsCallable(functions, 'adminListDashboard');
 const createKey = httpsCallable(functions, 'adminCreateKey');
 const setKeyStatus = httpsCallable(functions, 'adminSetKeyStatus');
+const archiveKey = httpsCallable(functions, 'adminArchiveKey');
+const archiveAccount = httpsCallable(functions, 'partnerArchiveAccount');
+const archiveCustomer = httpsCallable(functions, 'partnerArchiveCustomer');
 const setVersionRules = httpsCallable(functions, 'adminSetVersionRules');
 const listPartnerDashboard = httpsCallable(functions, 'partnerListDashboard');
 const loadAdminCreditSummary = httpsCallable(functions, 'adminCreditSummary');
@@ -34,9 +37,14 @@ let editingProfile = null;
 let adminPairingProfiles = [];
 let adminKeys = [];
 let showAllAdminKeys = false;
+let showArchivedKeys = false;
+let showArchivedAccounts = false;
+let showArchivedAdminCustomers = false;
+let showArchivedPartnerCustomers = false;
+let showArchivedPartnerLicenses = false;
 let partnerLicenses = [];
 let showAllPartnerLicenses = false;
-const licenseStatusLabel = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
+const licenseStatusLabel = { active: 'Active', trial: '7-day trial', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
 const licenseYearOptions = (selected = 1) => Array.from({ length: 10 }, (_, index) => index + 1)
   .map(years => `<option value="${years}" ${years === selected ? 'selected' : ''}>${years} year${years === 1 ? '' : 's'} · ${years} credit${years === 1 ? '' : 's'}</option>`).join('');
 function formatDateTime(value) { return value ? new Date(value).toLocaleString() : 'Not set'; }
@@ -48,28 +56,43 @@ function localDateTimeValue(value) {
 function openDialog(id) { $(id).showModal(); }
 function closeDialog(id) { $(id).close(); }
 function renderAdminKeys() {
-  const rows = showAllAdminKeys ? adminKeys : adminKeys.slice(0, 10);
-  $('keyListCount').textContent = adminKeys.length ? `Showing ${rows.length} of ${adminKeys.length}${adminKeys.length === 250 ? ' latest loaded' : ''} keys` : '';
+  const matching = adminKeys.filter(key => (key.archived === true) === showArchivedKeys);
+  const rows = showAllAdminKeys ? matching : matching.slice(0, 10);
+  $('keyListCount').textContent = matching.length ? `Showing ${rows.length} of ${matching.length}${adminKeys.length === 250 ? ' latest loaded' : ''} ${showArchivedKeys ? 'archived ' : ''}keys` : `No ${showArchivedKeys ? 'archived ' : ''}keys`;
   $('showMoreKeys').textContent = showAllAdminKeys ? 'Show fewer' : 'Show more';
-  setVisible('showMoreKeys', adminKeys.length > 10);
-  const state = k => k.expired ? 'Expired' : k.active ? 'Active' : 'Disabled';
-  const stateClass = k => k.expired || !k.active ? 'off' : 'on';
-  const creatorDetails = k => `<details class="accountDetails keyDetails"><summary>Key details, creator & actions</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(k.createdByName || (k.createdBy ? 'Admin (name unavailable)' : 'Unknown legacy creator'))}</b><span>Role</span><b>${escapeHtml(k.createdByRole || '—')}</b><span>Email</span><b>${escapeHtml(k.createdByEmail || '—')}</b><span>Account ID</span><code>${escapeHtml(k.createdBy || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(k.createdAt))}</b><span>Device assignments</span><b>${k.deviceCount} / ${k.deviceLimit}</b><span>Expiry</span><b>${escapeHtml(k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never')}</b><span>State</span><b>${state(k)}</b></div><button type="button" class="textButton keyStatusAction" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active ? 'Disable key' : 'Enable key'}</button></details>`;
-  $('keysBody').innerHTML = rows.map(k => `<tr><td><b>${escapeHtml(k.label || '—')}</b><br><small>•••• ${escapeHtml(k.keyHint || '—')}</small>${creatorDetails(k)}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${stateClass(k)}">${state(k)}</span></td></tr>`).join('') || '<tr><td colspan="4">No keys yet</td></tr>';
-  $('keyCards').innerHTML = rows.map(k => `<article class="keyCard customerCard"><div class="customerCardHead"><div><b>${escapeHtml(k.label || '—')}</b><small>•••• ${escapeHtml(k.keyHint || '—')}</small></div><span class="tag ${stateClass(k)}">${state(k)}</span></div>${creatorDetails(k)}</article>`).join('') || '<p class="muted">No keys yet.</p>';
+  setVisible('showMoreKeys', matching.length > 10);
+  $('toggleArchivedKeys').textContent = showArchivedKeys ? `Show active keys (${adminKeys.filter(key => !key.archived).length})` : `Show archived keys (${adminKeys.filter(key => key.archived).length})`;
+  setVisible('toggleArchivedKeys', adminKeys.some(key => key.archived));
+  const state = k => k.archived ? 'Archived' : k.expired ? 'Expired' : k.active ? 'Active' : 'Disabled';
+  const stateClass = k => !k.archived && !k.expired && k.active ? 'on' : 'off';
+  const keyActions = k => `<button type="button" class="textButton keyStatusAction" data-key="${escapeHtml(k.id)}" data-active="${k.active}" ${k.archived ? 'disabled' : ''}>${k.active ? 'Disable key' : 'Enable key'}</button>${k.ownerUid ? '<small class="muted">Customer licenses are managed from Customers.</small>' : `<button type="button" class="textButton keyArchiveAction" data-key-archive="${escapeHtml(k.id)}" data-archived="${k.archived === true}" ${!k.archived && k.deviceCount > 0 ? 'disabled title="Key has device assignments"' : ''}>${k.archived ? 'Restore key' : 'Archive key'}</button>`}`;
+  const creatorDetails = k => `<details class="accountDetails keyDetails"><summary>Key details, creator & actions</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(k.createdByName || (k.createdBy ? 'Admin (name unavailable)' : 'Unknown legacy creator'))}</b><span>Role</span><b>${escapeHtml(k.createdByRole || '—')}</b><span>Email</span><b>${escapeHtml(k.createdByEmail || '—')}</b><span>Account ID</span><code>${escapeHtml(k.createdBy || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(k.createdAt))}</b><span>Device assignments</span><b>${k.deviceCount} / ${k.deviceLimit}</b><span>Expiry</span><b>${escapeHtml(k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never')}</b><span>State</span><b>${state(k)}</b></div>${keyActions(k)}</details>`;
+  $('keysBody').innerHTML = rows.map(k => `<tr><td><b>${escapeHtml(k.label || '—')}</b><br><small>•••• ${escapeHtml(k.keyHint || '—')}</small>${creatorDetails(k)}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${stateClass(k)}">${state(k)}</span></td></tr>`).join('') || `<tr><td colspan="4">No ${showArchivedKeys ? 'archived ' : ''}keys</td></tr>`;
+  $('keyCards').innerHTML = rows.map(k => `<article class="keyCard customerCard"><div class="customerCardHead"><div><b>${escapeHtml(k.label || '—')}</b><small>•••• ${escapeHtml(k.keyHint || '—')}</small></div><span class="tag ${stateClass(k)}">${state(k)}</span></div>${creatorDetails(k)}</article>`).join('') || `<p class="muted">No ${showArchivedKeys ? 'archived ' : ''}keys.</p>`;
   document.querySelectorAll('#keysBody [data-key], #keyCards [data-key]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
     try { await setKeyStatus({ keyId:button.dataset.key, active:button.dataset.active !== 'true' }); await refreshDashboard(); }
     catch(error) { alert(friendlyError(error)); button.disabled = false; }
   }));
+  document.querySelectorAll('#keysBody [data-key-archive], #keyCards [data-key-archive]').forEach(button => button.addEventListener('click', async () => {
+    const archived = button.dataset.archived !== 'true';
+    if (!confirm(`${archived ? 'Archive' : 'Restore'} this key? ${archived ? 'It will leave the active list; key and creator history will be kept.' : 'It will return to the active keys list.'}`)) return;
+    button.disabled = true;
+    try { await archiveKey({ keyId:button.dataset.keyArchive, archived }); await refreshDashboard(); }
+    catch(error) { alert(friendlyError(error)); button.disabled = false; }
+  }));
 }
 function renderPartnerLicenses() {
-  const rows = showAllPartnerLicenses ? partnerLicenses : partnerLicenses.slice(0, 10);
-  $('partnerLicenseCount').textContent = partnerLicenses.length ? `Showing ${rows.length} of ${partnerLicenses.length}${partnerLicenses.length === 500 ? ' latest loaded' : ''} licenses` : '';
+  const matching = partnerLicenses.filter(item => (item.archived === true) === showArchivedPartnerLicenses);
+  const rows = showAllPartnerLicenses ? matching : matching.slice(0, 10);
+  $('partnerLicenseCount').textContent = matching.length ? `Showing ${rows.length} of ${matching.length}${partnerLicenses.length === 500 ? ' latest loaded' : ''} ${showArchivedPartnerLicenses ? 'archived ' : ''}licenses` : `No ${showArchivedPartnerLicenses ? 'archived ' : ''}licenses`;
   $('showMorePartnerLicenses').textContent = showAllPartnerLicenses ? 'Show fewer' : 'Show more';
-  setVisible('showMorePartnerLicenses', partnerLicenses.length > 10);
-  $('partnerKeysBody').innerHTML = rows.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${customer.keyHint ? `•••• ${escapeHtml(customer.keyHint)}` : 'Legacy license'}</td><td>${escapeHtml(customer.createdByName || '—')}</td><td>${customer.durationYears} year${customer.durationYears === 1 ? '' : 's'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span></td><td>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td></tr>`).join('') || '<tr><td colspan="6">No customer licenses created by this account yet.</td></tr>';
-  $('partnerKeysCards').innerHTML = rows.map(customer => `<article class="customerCard"><div class="customerCardHead"><b>${escapeHtml(customer.customerLabel)}</b><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span></div><p class="muted">License ${customer.keyHint ? `•••• ${escapeHtml(customer.keyHint)}` : 'created before key hints were recorded'} · ${customer.durationYears} year${customer.durationYears === 1 ? '' : 's'} · expires ${escapeHtml(formatDate(customer.licenseExpiresAt))}</p><small>Created by ${escapeHtml(customer.createdByName || '—')}</small></article>`).join('') || '<p class="muted">No customer licenses created by this account yet.</p>';
+  setVisible('showMorePartnerLicenses', matching.length > 10);
+  $('toggleArchivedPartnerLicenses').textContent = showArchivedPartnerLicenses ? `Show active licenses (${partnerLicenses.filter(item => !item.archived).length})` : `Show archived licenses (${partnerLicenses.filter(item => item.archived).length})`;
+  setVisible('toggleArchivedPartnerLicenses', partnerLicenses.some(item => item.archived));
+  const licenseLabel = customer => customer.archived ? 'Archived' : licenseStatusLabel[customer.licenseState] || 'Unknown';
+  $('partnerKeysBody').innerHTML = rows.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${customer.keyHint ? `•••• ${escapeHtml(customer.keyHint)}` : 'Legacy license'}</td><td>${escapeHtml(customer.createdByName || '—')}</td><td>${customer.trial ? '7-day trial' : `${customer.durationYears} year${customer.durationYears === 1 ? '' : 's'}`}</td><td><span class="tag ${customer.archived ? 'off' : ['active','trial'].includes(customer.licenseState) ? 'on' : 'off'}">${escapeHtml(licenseLabel(customer))}</span></td><td>${escapeHtml(formatDate(customer.trialExpiresAt || customer.licenseExpiresAt))}</td></tr>`).join('') || `<tr><td colspan="6">No ${showArchivedPartnerLicenses ? 'archived ' : ''}customer licenses created by this account.</td></tr>`;
+  $('partnerKeysCards').innerHTML = rows.map(customer => `<article class="customerCard compactLicenseCard"><div class="customerCardHead"><b>${escapeHtml(customer.customerLabel)}</b><span class="tag ${customer.archived ? 'off' : customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(licenseLabel(customer))}</span></div><p class="muted">${customer.keyHint ? `•••• ${escapeHtml(customer.keyHint)} · ` : ''}${customer.durationYears} year${customer.durationYears === 1 ? '' : 's'} · expires ${escapeHtml(formatDate(customer.licenseExpiresAt))}</p><details class="accountDetails"><summary>License details</summary><p>Created by ${escapeHtml(customer.createdByName || '—')}</p></details></article>`).join('') || `<p class="muted">No ${showArchivedPartnerLicenses ? 'archived ' : ''}customer licenses created by this account.</p>`;
 }
 function showAdminTab(tab) {
   const role = currentPartnerActor?.role || 'admin';
@@ -125,6 +148,9 @@ async function refreshDashboard() {
     for (const id of ['distributorMinCredits','distributorToResellerMax','resellerToProviderMin']) $(id).value = partnerData.limits[id];
   }
   const allAccounts = partnerData.accounts;
+  const displayedAccounts = allAccounts.filter(item => (item.archived === true) === showArchivedAccounts);
+  $('toggleArchivedAccounts').textContent = showArchivedAccounts ? `Show active accounts (${allAccounts.filter(item => !item.archived).length})` : `Show archived accounts (${allAccounts.filter(item => item.archived).length})`;
+  setVisible('toggleArchivedAccounts', allAccounts.some(item => item.archived));
   const roleChoices = actor.role === 'admin' ? ['distributor','reseller','provider'] : ['reseller','provider'];
   const parentChoices = (role, excludeUid = '') => {
     if (role === 'distributor') return [{ uid:'', displayName:'Admin', role:'admin' }];
@@ -179,8 +205,10 @@ async function refreshDashboard() {
     save.disabled = !!reason || unchanged;
   };
   const manage = account => {
+    const canArchive = actor.role === 'admin' || (account.parentUid === actor.uid && ((actor.role === 'distributor' && account.role === 'reseller') || (actor.role === 'reseller' && account.role === 'provider')));
+    if (account.archived) return canArchive ? `<div class="accountActions"><button class="textButton" data-partner-action="archive" data-uid="${escapeHtml(account.uid)}" data-archived="true">Restore account</button></div>` : '';
     const canTransfer = (actor.role === 'distributor' && account.role === 'reseller') || (actor.role === 'reseller' && account.role === 'provider');
-    return `<div class="accountActions">${canTransfer ? `<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(account.uid)}">Transfer credits</button>` : ''}${actor.role === 'admin' ? `<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(account.uid)}">Adjust credits</button>` : ''}${canRoleChange(account) ? `<details class="roleEditor"><summary>Change role</summary><label>Role<select data-role-for="${escapeHtml(account.uid)}">${roleOptions(account)}</select></label><label>Parent<select data-parent-for="${escapeHtml(account.uid)}" ${account.role === 'distributor' ? 'disabled' : ''}>${parentOptions(account)}</select></label><p class="note roleHelp hidden" data-role-help="${escapeHtml(account.uid)}"></p><button class="ghost small" data-partner-action="role" data-uid="${escapeHtml(account.uid)}">Save role</button></details>` : ''}</div>`;
+    return `<div class="accountActions">${canTransfer ? `<button class="textButton" data-partner-action="transfer" data-uid="${escapeHtml(account.uid)}">Transfer credits</button>` : ''}${actor.role === 'admin' ? `<button class="textButton" data-partner-action="adjust" data-uid="${escapeHtml(account.uid)}">Adjust credits</button>` : ''}${canRoleChange(account) ? `<details class="roleEditor"><summary>Change role</summary><label>Role<select data-role-for="${escapeHtml(account.uid)}">${roleOptions(account)}</select></label><label>Parent<select data-parent-for="${escapeHtml(account.uid)}" ${account.role === 'distributor' ? 'disabled' : ''}>${parentOptions(account)}</select></label><p class="note roleHelp hidden" data-role-help="${escapeHtml(account.uid)}"></p><button class="ghost small" data-partner-action="role" data-uid="${escapeHtml(account.uid)}">Save role</button></details>` : ''}${canArchive ? `<button class="textButton" data-partner-action="archive" data-uid="${escapeHtml(account.uid)}" data-archived="false">Archive account</button>` : ''}</div>`;
   };
   const details = account => {
     const events = (partnerData.recentActivity || []).filter(item => item.fromUid === account.uid || item.toUid === account.uid || item.actorUid === account.uid).slice(0, 8);
@@ -191,8 +219,8 @@ async function refreshDashboard() {
   $('partnerOverviewActivity').innerHTML = recentEvents.map(item => `<li>${escapeHtml(activityLabel(item.type))}${item.durationYears ? ` · ${item.durationYears} year${item.durationYears === 1 ? '' : 's'}` : ''} · ${item.amount} credit${item.amount === 1 ? '' : 's'} · ${escapeHtml(item.fromName)} → ${escapeHtml(item.toName)} · by ${escapeHtml(item.actorName)} <small>${escapeHtml(formatDateTime(item.createdAt))}</small></li>`).join('');
   setVisible('partnerOverviewActivityEmpty', recentEvents.length === 0);
   $('partnerOverviewActivity').classList.toggle('hidden', recentEvents.length === 0);
-  $('accountsBody').innerHTML = allAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
-  $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
+  $('accountsBody').innerHTML = displayedAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.archived?'off':a.active?'on':'off'}">${a.archived?'Archived':a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || `<tr><td colspan="6">No ${showArchivedAccounts ? 'archived ' : ''}accounts to show</td></tr>`;
+  $('accountsCards').innerHTML = displayedAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.archived?'off':a.active?'on':'off'}">${a.archived?'Archived':a.active?'Active':'Disabled'}</span></div><details class="accountDetails"><summary>Account details</summary>${details(a)}</details><details class="accountDetails"><summary>${a.archived ? 'Restore account' : 'Manage account'}</summary>${manage(a)}</details></article>`).join('') || `<p class="muted">No ${showArchivedAccounts ? 'archived ' : ''}accounts to show.</p>`;
   document.querySelectorAll('#accountsBody tr, #accountsCards .accountCard').forEach(row => {
     const role = row.querySelector('[data-role-for]');
     const account = role && allAccounts.find(item => item.uid === role.dataset.roleFor);
@@ -202,7 +230,11 @@ async function refreshDashboard() {
     const button = event.target.closest('[data-partner-action]'); if (!button) return;
     const account = partnerData.accounts.find(a => a.uid === button.dataset.uid); if (!account) return;
     try {
-      if (button.dataset.partnerAction === 'transfer') {
+      if (button.dataset.partnerAction === 'archive') {
+        const archived = button.dataset.archived !== 'true';
+        if (!confirm(`${archived ? 'Archive' : 'Restore'} ${account.displayName}? ${archived ? 'The account will be disabled and hidden; its credit and account history will remain.' : 'The account will be re-enabled.'}`)) return;
+        await archiveAccount({ targetUid: account.uid, archived });
+      } else if (button.dataset.partnerAction === 'transfer') {
         transferTarget = account;
         $('creditTransferRecipient').textContent = `${account.displayName} · ${account.role}`;
         const rules = partnerData.transferRules || {};
@@ -298,11 +330,29 @@ function loadAdminCustomers() {
 async function refreshAdminProviderDashboard() {
   $('adminCustomerError').textContent = '';
   const data = (await adminProviderDashboard()).data;
-  $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
-  const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
-  $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Key details</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Creator ID</span><code>${escapeHtml(customer.createdBy || '—')}</code><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Parent account ID</span><code>${escapeHtml(customer.parentUid || '—')}</code><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
-  $('adminCustomerCards').innerHTML = data.customers.map(customer => `<article class="customerCard adminCustomerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.providerName)} · ${escapeHtml(customer.partnerRole || 'partner')}</small></div><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span></div><p class="customerCardExpiry">License until <b>${escapeHtml(formatDate(customer.licenseExpiresAt))}</b></p><details class="accountDetails"><summary>Device, portal & account details</summary><div class="detailGrid"><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Device ID</span><code>${escapeHtml(customer.deviceId || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Platform</span><b>${escapeHtml(customer.platform || '—')}</b><span>Portal</span><b>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</b><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div><button class="textButton adminLicenseAction" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable license' : 'Enable license'}</button></details></article>`).join('') || '<p class="muted">No customer devices yet.</p>';
+  const archivedCount = data.customers.filter(customer => customer.archived).length;
+  const customers = data.customers.filter(customer => (customer.archived === true) === showArchivedAdminCustomers);
+  $('adminCustomerSummary').textContent = `${customers.length} ${showArchivedAdminCustomers ? 'archived ' : ''}customer device${customers.length === 1 ? '' : 's'}${data.hasMore ? ' · latest 500' : ''}`;
+  $('toggleArchivedAdminCustomers').textContent = showArchivedAdminCustomers ? `Show active customers (${data.customers.length - archivedCount})` : `Show archived customers (${archivedCount})`;
+  setVisible('toggleArchivedAdminCustomers', archivedCount > 0);
+  const labels = { active: 'Active', trial: '7-day trial', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
+  const statusLabel = customer => customer.archived ? 'Archived' : labels[customer.licenseState] || 'Unknown';
+  const statusClass = customer => !customer.archived && ['active','trial'].includes(customer.licenseState) ? 'on' : 'off';
+  const customerButtons = customer => customer.archived
+    ? `<button class="textButton" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="true">Restore customer</button>`
+    : `<button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable license' : 'Enable license'}</button><button class="textButton" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="false">Archive customer</button>`;
+  $('adminCustomersBody').innerHTML = customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Account details</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</td><td><span class="tag ${statusClass(customer)}">${escapeHtml(statusLabel(customer))}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${customerButtons(customer)}</td></tr>`).join('') || `<tr><td colspan="10">No ${showArchivedAdminCustomers ? 'archived ' : ''}customers</td></tr>`;
+  $('adminCustomerCards').innerHTML = customers.map(customer => `<article class="customerCard adminCustomerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.providerName)} · ${escapeHtml(customer.partnerRole || 'partner')}</small></div><span class="tag ${statusClass(customer)}">${escapeHtml(statusLabel(customer))}</span></div><p class="customerCardExpiry">${customer.trial ? 'Trial until' : 'License until'} <b>${escapeHtml(formatDate(customer.trialExpiresAt || customer.licenseExpiresAt))}</b></p><details class="accountDetails"><summary>Device & account details</summary><div class="detailGrid"><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Device ID</span><code>${escapeHtml(customer.deviceId || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Platform</span><b>${escapeHtml(customer.platform || '—')}</b><span>Portal</span><b>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}</b><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b></div>${customerButtons(customer)}</details></article>`).join('') || `<p class="muted">No ${showArchivedAdminCustomers ? 'archived ' : ''}customers yet.</p>`;
   $('adminCustomersBody').onclick = $('adminCustomerCards').onclick = async event => {
+    const archiveButton = event.target.closest('[data-customer-archive]');
+    if (archiveButton) {
+      const archived = archiveButton.dataset.archived !== 'true';
+      if (!confirm(`${archived ? 'Archive' : 'Restore'} this customer? ${archived ? 'The app license will be disabled, and customer, credit, and license history will be kept.' : 'The previous license state will be restored.'}`)) return;
+      archiveButton.disabled = true;
+      try { await archiveCustomer({ deviceRef: archiveButton.dataset.customerArchive, archived }); await refreshDashboard(); }
+      catch (error) { alert(friendlyError(error)); archiveButton.disabled = false; }
+      return;
+    }
     const button = event.target.closest('[data-admin-license]'); if (!button) return;
     const active = button.dataset.active !== 'true';
     if (!confirm(`${active ? 'Enable' : 'Disable'} this customer app license?`)) return;
@@ -318,10 +368,13 @@ function formatDate(value) { return value ? new Date(value).toLocaleDateString()
 async function refreshProviderDashboard() {
   $('providerError').textContent = '';
   const data = (await providerDashboard()).data;
-  $('providerSummary').textContent = `${data.customers.length} customer device${data.customers.length === 1 ? '' : 's'} · ${data.account.credits} credits`;
+  const activeCustomers = data.customers.filter(customer => !customer.archived);
+  const customers = data.customers.filter(customer => (customer.archived === true) === showArchivedPartnerCustomers);
+  const archivedCount = data.customers.filter(customer => customer.archived).length;
+  $('providerSummary').textContent = `${activeCustomers.length} customer${activeCustomers.length === 1 ? '' : 's'} · ${data.account.credits} credits`;
   $('partnerOverviewCredits').textContent = Number(data.account.credits || 0).toLocaleString();
-  $('partnerOverviewCustomers').textContent = data.customers.length.toLocaleString();
-  $('partnerOverviewActive').textContent = data.customers.filter(item => item.licenseState === 'active').length.toLocaleString();
+  $('partnerOverviewCustomers').textContent = activeCustomers.length.toLocaleString();
+  $('partnerOverviewActive').textContent = activeCustomers.filter(item => ['active','trial'].includes(item.licenseState)).length.toLocaleString();
   $('partnerOverviewPortals').textContent = data.profiles.filter(profile => profile.active).length.toLocaleString();
   const activeProfiles = data.profiles.filter(profile => profile.active);
   const profileOptions = activeProfiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)} · ${escapeHtml(profile.host)}</option>`).join('');
@@ -340,12 +393,23 @@ async function refreshProviderDashboard() {
   };
   partnerLicenses = data.customers;
   renderPartnerLicenses();
+  $('toggleArchivedPartnerCustomers').textContent = showArchivedPartnerCustomers ? `Show active customers (${data.customers.length - archivedCount})` : `Show archived customers (${archivedCount})`;
+  setVisible('toggleArchivedPartnerCustomers', archivedCount > 0);
   const portalControl = customer => `<div class="devicePortalControl"><select data-device-profile aria-label="Active portal for ${escapeHtml(customer.customerLabel)}"><option value="">Choose active portal</option>${activeProfiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === customer.portalProfileId ? 'selected' : ''}>${escapeHtml(profile.name)} · ${escapeHtml(profile.host)}</option>`).join('')}</select><button class="textButton" data-switch-portal="${escapeHtml(customer.deviceRef)}" ${activeProfiles.length ? '' : 'disabled'}>Switch portal</button><small>Current: ${escapeHtml(customer.portalName)}${customer.portalActive ? '' : ' · inactive'}</small></div>`;
   const renewalControl = customer => customer.active && customer.licenseState !== 'disabled'
-    ? `<div class="renewControls"><select data-renew-years aria-label="Renewal term for ${escapeHtml(customer.customerLabel)}">${licenseYearOptions()}</select><button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">Renew</button></div>` : '—';
-  $('customersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${portalControl(customer)}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${renewalControl(customer)}</td></tr>`).join('') || '<tr><td colspan="9">No customer devices assigned yet</td></tr>';
-  $('customerCards').innerHTML = data.customers.map(customer => `<article class="customerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.platform || 'Device')}</small></div><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span></div><p class="customerCardExpiry">App license until <b>${escapeHtml(formatDate(customer.licenseExpiresAt))}</b></p><div class="cardField"><span>Portal for this customer</span>${portalControl(customer)}</div><details class="accountDetails"><summary>Device details</summary><div class="detailGrid"><span>Device ID</span><code>${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b><span>License grace</span><b>${customer.licenseState === 'grace' ? `Until ${escapeHtml(formatDate(customer.graceUntil))}` : 'Seven days after expiry'}</b></div></details><div class="customerRenew">${renewalControl(customer)}</div></article>`).join('') || '<p class="muted">No customer devices assigned yet.</p>';
+    ? `<div class="renewControls"><select data-renew-years aria-label="${customer.trial ? 'Activation' : 'Renewal'} term for ${escapeHtml(customer.customerLabel)}">${licenseYearOptions()}</select><button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">${customer.trial ? 'Activate license' : 'Renew'}</button></div>` : '—';
+  $('customersBody').innerHTML = customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${customer.archived ? '—' : portalControl(customer)}</td><td><span class="tag ${!customer.archived && customer.licenseState === 'active' ? 'on' : 'off'}">${customer.archived ? 'Archived' : escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${customer.archived ? `<button class="textButton" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="true">Restore</button>` : `${renewalControl(customer)}<button class="textButton" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="false">Archive</button>`}</td></tr>`).join('') || `<tr><td colspan="9">No ${showArchivedPartnerCustomers ? 'archived ' : ''}customer devices</td></tr>`;
+  $('customerCards').innerHTML = customers.map(customer => `<article class="customerCard compactCustomerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.platform || 'Device')}</small></div><span class="tag ${!customer.archived && ['active','trial'].includes(customer.licenseState) ? 'on' : 'off'}">${customer.archived ? 'Archived' : escapeHtml(licenseStatusLabel[customer.licenseState] || 'Unknown')}</span></div><p class="customerCardExpiry">${customer.trial ? 'Trial until' : 'License until'} <b>${escapeHtml(formatDate(customer.trialExpiresAt || customer.licenseExpiresAt))}</b></p><details class="accountDetails customerManageDetails"><summary>${customer.archived ? 'Archived details & restore' : 'Manage customer & device details'}</summary>${customer.archived ? '' : `<div class="cardField"><span>Portal for this customer</span>${portalControl(customer)}</div>`}<div class="detailGrid"><span>Device ID</span><code>${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b><span>${customer.trial ? 'Trial' : 'License grace'}</span><b>${customer.trial ? '7 days, no credits' : customer.licenseState === 'grace' ? `Until ${escapeHtml(formatDate(customer.graceUntil))}` : 'Seven days after expiry'}</b></div>${customer.archived ? `<button class="textButton customerArchiveAction" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="true">Restore customer</button>` : `<div class="customerRenew">${renewalControl(customer)}</div><button class="textButton customerArchiveAction" data-customer-archive="${escapeHtml(customer.deviceRef)}" data-archived="false">Archive customer</button>`}</details></article>`).join('') || `<p class="muted">No ${showArchivedPartnerCustomers ? 'archived ' : ''}customer devices assigned yet.</p>`;
   const handleCustomerAction = async event => {
+    const archiveButton = event.target.closest('[data-customer-archive]');
+    if (archiveButton) {
+      const archived = archiveButton.dataset.archived !== 'true';
+      if (!confirm(`${archived ? 'Archive' : 'Restore'} this customer? ${archived ? 'The app license will be disabled, while customer, credit, and license history are kept.' : 'The previous license state will be restored.'}`)) return;
+      archiveButton.disabled = true;
+      try { await archiveCustomer({ deviceRef: archiveButton.dataset.customerArchive, archived }); await refreshDashboard(); }
+      catch (error) { $('providerError').textContent = friendlyError(error); archiveButton.disabled = false; }
+      return;
+    }
     const switchButton = event.target.closest('[data-switch-portal]');
     if (switchButton) {
       const deviceRef = switchButton.dataset.switchPortal;
@@ -359,9 +423,10 @@ async function refreshProviderDashboard() {
     const button = event.target.closest('[data-renew-device]'); if (!button) return;
     const years = Number(button.closest('tr, .customerCard')?.querySelector('[data-renew-years]')?.value);
     if (!Number.isSafeInteger(years) || years < 1 || years > 10) return;
-    if (!confirm(`Renew ${customerLabelForDevice(button.dataset.renewDevice, data.customers)} for ${years} year${years === 1 ? '' : 's'} using ${years} credit${years === 1 ? '' : 's'}?`)) return;
+    const selectedCustomer = data.customers.find(item => item.deviceRef === button.dataset.renewDevice);
+    if (!confirm(`${selectedCustomer?.trial ? 'Activate' : 'Renew'} ${customerLabelForDevice(button.dataset.renewDevice, data.customers)} for ${years} year${years === 1 ? '' : 's'} using ${years} credit${years === 1 ? '' : 's'}?`)) return;
     button.disabled = true;
-    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice, years })).data; await refreshDashboard(); $('providerError').textContent = `License renewed until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`; }
+    try { const result = (await renewDeviceLicense({ deviceRef: button.dataset.renewDevice, years })).data; await refreshDashboard(); $('providerError').textContent = `${result.activatedFromTrial ? 'Trial converted to license' : 'License renewed'} until ${new Date(result.expiresAt).toLocaleDateString()}. ${result.remainingCredits} credits remain.`; }
     catch (error) { $('providerError').textContent = friendlyError(error); button.disabled = false; }
   };
   $('customersBody').onclick = $('customerCards').onclick = handleCustomerAction;
@@ -375,6 +440,11 @@ $('loginForm').addEventListener('submit', async event => {
 $('logout').addEventListener('click', () => signOut(auth));
 $('showMoreKeys').addEventListener('click', () => { showAllAdminKeys = !showAllAdminKeys; renderAdminKeys(); });
 $('showMorePartnerLicenses').addEventListener('click', () => { showAllPartnerLicenses = !showAllPartnerLicenses; renderPartnerLicenses(); });
+$('toggleArchivedKeys').addEventListener('click', () => { showArchivedKeys = !showArchivedKeys; showAllAdminKeys = false; renderAdminKeys(); });
+$('toggleArchivedPartnerLicenses').addEventListener('click', () => { showArchivedPartnerLicenses = !showArchivedPartnerLicenses; showAllPartnerLicenses = false; renderPartnerLicenses(); });
+$('toggleArchivedAccounts').addEventListener('click', () => { showArchivedAccounts = !showArchivedAccounts; refreshDashboard().catch(error => $('dashboardError').textContent = friendlyError(error)); });
+$('toggleArchivedAdminCustomers').addEventListener('click', () => { showArchivedAdminCustomers = !showArchivedAdminCustomers; loadAdminCustomers(); });
+$('toggleArchivedPartnerCustomers').addEventListener('click', () => { showArchivedPartnerCustomers = !showArchivedPartnerCustomers; refreshProviderDashboard().catch(error => $('providerError').textContent = friendlyError(error)); });
 $('refreshPartner').addEventListener('click', () => refreshDashboard().catch(e => alert(friendlyError(e))));
 $('createPartner').addEventListener('click', () => {
   if (!currentPartnerActor || !currentPartnerData) return;
@@ -476,7 +546,7 @@ $('pairCustomer').addEventListener('click', () => {
   setVisible('adminPairingOwnerField', false);
   $('adminPairingOwner').required = false;
   $('pairingDialogTitle').textContent = 'Assign a device';
-  $('pairingHelp').textContent = `Enter the short-lived code shown in the customer's app. Choose 1–10 years; each year uses 1 credit. Re-pairing an already licensed device changes its assignment without charging again.`;
+  $('pairingHelp').textContent = `Choose a free 7-day app trial or activate a 1–10 year license. Trial does not use credits and can be used once per device; after the trial, activate a paid term.`;
   $('providerError').textContent = '';
   $('pairingResult').textContent = '';
   openDialog('pairCustomerDialog');
@@ -494,11 +564,13 @@ $('pairAdminCustomer').addEventListener('click', () => {
   $('pairingProfile').disabled = true;
   $('adminPairingCreditNote').textContent = 'Choose who will own this customer. A new license uses credits from that partner.';
   $('pairingDialogTitle').textContent = 'Add customer to a partner';
-  $('pairingHelp').textContent = `Choose the active partner that will own this customer, then enter the short-lived code from the customer's app. A new license uses 1 credit per year; reassigning an already licensed device does not charge again.`;
+  $('pairingHelp').textContent = `Choose the active partner that will own this customer, then enter the short-lived code. Trial is free for 7 days; a paid license uses 1 credit per year.`;
   $('pairingResult').textContent = '';
   setVisible('adminPairingOwnerField', true);
   openDialog('pairCustomerDialog');
 });
+$('pairingMode').addEventListener('change', () => setVisible('durationYearsField', $('pairingMode').value === 'paid'));
+$('pairingMode').dispatchEvent(new Event('change'));
 $('adminPairingOwner').addEventListener('change', async () => {
   const partnerUid = $('adminPairingOwner').value;
   $('pairingResult').textContent = '';
@@ -516,7 +588,7 @@ $('adminPairingOwner').addEventListener('change', async () => {
     $('pairingProfile').innerHTML = data.profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)} · ${escapeHtml(profile.host || 'host unavailable')}</option>`).join('') || '<option value="">No active STB profiles</option>';
     $('pairingProfile').disabled = data.profiles.length === 0;
     $('adminPairingCreditNote').textContent = data.profiles.length
-      ? `${data.partner.displayName} has ${data.partner.credits} credits. The selected 1–10 year term will be deducted from this account when a new customer license is activated.`
+      ? `${data.partner.displayName} has ${data.partner.credits} credits. A 7-day trial costs 0 credits; a paid 1–10 year license uses 1 credit per year.`
       : `${data.partner.displayName} has no active STB profiles. Add one in that account's Settings before pairing a customer.`;
   } catch (error) {
     adminPairingProfiles = [];
@@ -546,15 +618,17 @@ $('pairingForm').addEventListener('submit', async event => {
   const submit = $('pairingForm').querySelector('[type="submit"]');
   submit.disabled = true;
   try {
+    const trial = $('pairingMode').value === 'trial';
     const years = Number($('durationYears').value);
-    const payload = { pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), durationYears: years };
+    const payload = { pairingCode, profileId, customerLabel: $('customerLabel').value.trim(), trial };
+    if (!trial) payload.durationYears = years;
     if (isAdmin) payload.partnerUid = partnerUid;
     const result = (await completePairing(payload)).data;
     const ownerName = result.ownerName || actor?.displayName || actor?.role || 'Partner';
     const summary = result.existingLicense
       ? `${ownerName}: existing license kept; no credits deducted. Balance remains ${result.remainingCredits} credits.`
-      : `${years}-year customer license activated. ${result.creditsUsed} credits deducted from ${ownerName}; new balance: ${result.remainingCredits}.`;
-    $('pairingForm').reset();
+      : result.trial ? `7-day app trial started for ${ownerName}; 0 credits used. Activate a paid license before the trial ends.` : `${years}-year customer license activated. ${result.creditsUsed} credits deducted from ${ownerName}; new balance: ${result.remainingCredits}.`;
+    $('pairingForm').reset(); $('pairingMode').dispatchEvent(new Event('change'));
     closeDialog('pairCustomerDialog');
     if (isAdmin) $('adminPairingNotice').textContent = summary;
     else $('providerError').textContent = summary;
