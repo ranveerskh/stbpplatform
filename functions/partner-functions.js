@@ -253,7 +253,7 @@ const callables = {
     ]);
     const used = issued + renewed;
     // Adjustments can add or remove credits, so reconcile using their signed delta.
-    return { allocated, adjustmentNet: signedAdjustment, used, transferred, held,
+    return { allocated, totalAllocated: allocated + signedAdjustment, adjustmentNet: signedAdjustment, used, transferred, held,
       reconciliation: allocated + signedAdjustment - used - held };
   }),
 

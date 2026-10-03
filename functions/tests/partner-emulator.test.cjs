@@ -172,7 +172,7 @@ async function test() {
   assert.equal(dashboard.creditSummary, undefined, 'The partner list endpoint stays independent from optional Admin credit totals.');
   const creditSummary = await invoke('adminCreditSummary', adminUser.token);
   assert.deepEqual(creditSummary, {
-    allocated: 500, adjustmentNet: 0, used: 1, transferred: 40, held: 499, reconciliation: 0
+    allocated: 500, totalAllocated: 500, adjustmentNet: 0, used: 1, transferred: 40, held: 499, reconciliation: 0
   }, 'Admin credit overview reconciles issued credits, license use, transfers, and current partner balances.');
   await expectCallableError(invoke('adminCreditSummary', distributor.token), 'Admin access is required');
   const resellerRow = dashboard.accounts.find(row => row.uid === reseller.uid);
@@ -351,6 +351,14 @@ async function test() {
   assert((await account(distributor.uid)).credits >= 0, 'Concurrent transfers never make a balance negative.');
   ledgerRows = (await db.collection('creditLedger').get()).docs.map(doc => doc.data());
   assert.equal(ledgerRows.filter(row => row.type === 'transfer' && row.fromUid === distributor.uid && row.amount === 250).length, 1, 'The ledger has exactly one record for the successful concurrent transfer.');
+  const beforeAdjustment = await invoke('adminCreditSummary', adminUser.token);
+  await invoke('adminAdjustPartnerCredits', adminUser.token, { targetUid: distributor.uid, delta: 100 });
+  const adjustedSummary = await invoke('adminCreditSummary', adminUser.token);
+  assert.equal(adjustedSummary.totalAllocated, beforeAdjustment.totalAllocated + 100, 'Admin adjustments are included in total allocated credits.');
+  assert.equal(adjustedSummary.allocated, beforeAdjustment.allocated, 'Initial allocations remain separately auditable.');
+  assert.equal(adjustedSummary.adjustmentNet, beforeAdjustment.adjustmentNet + 100);
+  assert.equal(adjustedSummary.held, beforeAdjustment.held + 100);
+  assert.equal(adjustedSummary.reconciliation, beforeAdjustment.reconciliation);
 
   const manualKey = await invoke('adminCreateKey', adminUser.token, { label: 'Creator audit test', deviceLimit: 1, expiresAt: null });
   const adminDashboard = await invoke('adminListDashboard', adminUser.token);
