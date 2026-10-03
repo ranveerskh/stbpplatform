@@ -1,6 +1,7 @@
 const { onCall, onRequest, HttpsError } = require('firebase-functions/v2/https');
 const logger = require('firebase-functions/logger');
 const admin = require('firebase-admin');
+const { FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { createHash, randomBytes } = require('node:crypto');
 
 admin.initializeApp();
@@ -11,7 +12,7 @@ const region = 'northamerica-northeast1';
 const settingsRef = db.collection('platform').doc('settings');
 const keysRef = db.collection('registrationKeys');
 const hash = value => createHash('sha256').update(value).digest('hex');
-const stamp = () => admin.firestore.FieldValue.serverTimestamp();
+const stamp = () => FieldValue.serverTimestamp();
 const fail = (code, message) => { throw new HttpsError(code, message); };
 const text = (value, max = 100) => String(value || '').trim().slice(0, max);
 
@@ -44,11 +45,11 @@ async function recordAppUsage(deviceId, platform, appVersion) {
   await db.runTransaction(async tx => {
     const old = await tx.get(ref);
     tx.set(ref, { platform, appVersion, firstSeen: old.exists ? old.data().firstSeen : stamp(), lastSeen: stamp(),
-      deleteAt: admin.firestore.Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000), active: true }, { merge: true });
+      deleteAt: Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000), active: true }, { merge: true });
   });
 }
 function deviceDeleteAt() {
-  return admin.firestore.Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  return Timestamp.fromMillis(Date.now() + 365 * 24 * 60 * 60 * 1000);
 }
 async function readSettings() {
   const snap = await settingsRef.get();
@@ -71,7 +72,9 @@ exports.adminCreateKey = onCall({ region }, async request => {
   if (expiresAtMillis !== null && (!Number.isFinite(expiresAtMillis) || expiresAtMillis <= Date.now())) fail('invalid-argument', 'Expiry must be a future date and time.');
   const key = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
   await keysRef.doc(hash(key)).set({ label, keyHint: key.slice(-4), active: true, deviceLimit,
-    expiresAt: expiresAtMillis === null ? null : admin.firestore.Timestamp.fromMillis(expiresAtMillis), createdAt: stamp() });
+    expiresAt: expiresAtMillis === null ? null : Timestamp.fromMillis(expiresAtMillis), createdAt: stamp(),
+    createdBy: request.auth.uid, createdByRole: 'admin', createdByName: text(request.auth.token?.name || request.auth.token?.email, 100),
+    createdByEmail: text(request.auth.token?.email, 254).toLowerCase() });
   return { key, keyHint: key.slice(-4), deviceLimit, expiresAt: expiresAtMillis };
 });
 
@@ -84,9 +87,9 @@ exports.adminListDashboard = onCall({ region }, async request => {
     db.collectionGroup('devices').where('active', '==', true).count().get(),
     readSettings(),
     db.collection('appDevices').count().get(),
-    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000)).count().get(),
-    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 7 * 24 * 60 * 60 * 1000)).count().get(),
-    db.collection('appDevices').where('lastSeen', '>=', admin.firestore.Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', Timestamp.fromMillis(Date.now() - 7 * 24 * 60 * 60 * 1000)).count().get(),
+    db.collection('appDevices').where('lastSeen', '>=', Timestamp.fromMillis(Date.now() - 30 * 24 * 60 * 60 * 1000)).count().get(),
     db.collection('appDevices').where('platform', '==', 'android').count().get(),
     db.collection('appDevices').where('platform', '==', 'windows').count().get()
   ]);
