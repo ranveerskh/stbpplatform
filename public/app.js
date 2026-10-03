@@ -18,6 +18,7 @@ const createPortalProfile = httpsCallable(functions, 'partnerCreatePortalProfile
 const updatePortalProfile = httpsCallable(functions, 'partnerUpdatePortalProfile');
 const completePairing = httpsCallable(functions, 'partnerCompletePairing');
 const renewDeviceLicense = httpsCallable(functions, 'partnerRenewDeviceLicense');
+const switchDevicePortal = httpsCallable(functions, 'partnerSwitchDevicePortal');
 const adminProviderDashboard = httpsCallable(functions, 'adminProviderDashboard');
 const adjustPartnerCredits = httpsCallable(functions, 'adminAdjustPartnerCredits');
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -188,9 +189,19 @@ async function refreshProviderDashboard() {
   const statusLabel = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
   $('customersBody').innerHTML = data.customers.map(customer => {
     const canRenew = customer.active && customer.licenseState !== 'disabled';
-    return `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)}${customer.portalActive ? '' : ' · disabled'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(statusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${canRenew ? `<button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">Renew · 1 credit</button>` : '—'}</td></tr>`;
+    return `<tr><td>${escapeHtml(customer.customerLabel)}</td><td><code class="deviceReference">${escapeHtml(customer.deviceId || customer.deviceRef || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td><select data-device-profile="${escapeHtml(customer.deviceRef)}">${data.profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === customer.portalProfileId ? 'selected' : ''} ${profile.active ? '' : 'disabled'}>${escapeHtml(profile.name)}${profile.active ? '' : ' · inactive'}</option>`).join('')}</select><button class="textButton" data-switch-portal="${escapeHtml(customer.deviceRef)}">Switch portal</button><small>Current: ${escapeHtml(customer.portalName)}${customer.portalActive ? '' : ' · disabled'}</small></td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(statusLabel[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td>${canRenew ? `<button class="textButton" data-renew-device="${escapeHtml(customer.deviceRef)}">Renew · 1 credit</button>` : '—'}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No customer devices assigned yet</td></tr>';
   $('customersBody').onclick = async event => {
+    const switchButton = event.target.closest('[data-switch-portal]');
+    if (switchButton) {
+      const deviceRef = switchButton.dataset.switchPortal;
+      const profileId = $('customersBody').querySelector(`[data-device-profile="${CSS.escape(deviceRef)}"]`)?.value;
+      if (!profileId || profileId === data.customers.find(item => item.deviceRef === deviceRef)?.portalProfileId) return;
+      switchButton.disabled = true;
+      try { await switchDevicePortal({ deviceRef, profileId }); alert('Customer portal updated. The device will receive it on its next sync.'); await refreshProviderDashboard(); }
+      catch (error) { alert(friendlyError(error)); switchButton.disabled = false; }
+      return;
+    }
     const button = event.target.closest('[data-renew-device]'); if (!button) return;
     const years = Number(prompt(`License renewal for ${customerLabelForDevice(button.dataset.renewDevice, data.customers)}: choose 1–10 years. Each year uses 1 credit. Available: ${data.account.credits}.`, '1'));
     if (!Number.isSafeInteger(years) || years < 1 || years > 10) return;
