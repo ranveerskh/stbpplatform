@@ -54,10 +54,9 @@ function renderAdminKeys() {
   setVisible('showMoreKeys', adminKeys.length > 10);
   const state = k => k.expired ? 'Expired' : k.active ? 'Active' : 'Disabled';
   const stateClass = k => k.expired || !k.active ? 'off' : 'on';
-  const creatorDetails = k => `<details class="accountDetails"><summary>Key details & creator</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(k.createdByName || (k.createdBy ? 'Admin (name unavailable)' : 'Unknown legacy creator'))}</b><span>Role</span><b>${escapeHtml(k.createdByRole || '—')}</b><span>Email</span><b>${escapeHtml(k.createdByEmail || '—')}</b><span>Account ID</span><code>${escapeHtml(k.createdBy || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(k.createdAt))}</b><span>Device assignments</span><b>${k.deviceCount} / ${k.deviceLimit}</b></div></details>`;
-  const statusButton = k => `<button type="button" class="textButton" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active ? 'Disable' : 'Enable'}</button>`;
-  $('keysBody').innerHTML = rows.map(k => `<tr><td><b>${escapeHtml(k.label || '—')}</b><br><small>•••• ${escapeHtml(k.keyHint || '—')}</small>${creatorDetails(k)}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${stateClass(k)}">${state(k)}</span></td><td>${statusButton(k)}</td></tr>`).join('') || '<tr><td colspan="5">No keys yet</td></tr>';
-  $('keyCards').innerHTML = rows.map(k => `<article class="keyCard customerCard"><div class="customerCardHead"><div><b>${escapeHtml(k.label || '—')}</b><small>•••• ${escapeHtml(k.keyHint || '—')}</small></div><span class="tag ${stateClass(k)}">${state(k)}</span></div><div class="detailGrid keySummary"><span>Devices</span><b>${k.deviceCount} / ${k.deviceLimit}</b><span>Expires</span><b>${escapeHtml(k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never')}</b></div><div class="keyCardActions">${creatorDetails(k)}${statusButton(k)}</div></article>`).join('') || '<p class="muted">No keys yet.</p>';
+  const creatorDetails = k => `<details class="accountDetails keyDetails"><summary>Key details, creator & actions</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(k.createdByName || (k.createdBy ? 'Admin (name unavailable)' : 'Unknown legacy creator'))}</b><span>Role</span><b>${escapeHtml(k.createdByRole || '—')}</b><span>Email</span><b>${escapeHtml(k.createdByEmail || '—')}</b><span>Account ID</span><code>${escapeHtml(k.createdBy || '—')}</code><span>Created</span><b>${escapeHtml(formatDateTime(k.createdAt))}</b><span>Device assignments</span><b>${k.deviceCount} / ${k.deviceLimit}</b><span>Expiry</span><b>${escapeHtml(k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never')}</b><span>State</span><b>${state(k)}</b></div><button type="button" class="textButton keyStatusAction" data-key="${escapeHtml(k.id)}" data-active="${k.active}">${k.active ? 'Disable key' : 'Enable key'}</button></details>`;
+  $('keysBody').innerHTML = rows.map(k => `<tr><td><b>${escapeHtml(k.label || '—')}</b><br><small>•••• ${escapeHtml(k.keyHint || '—')}</small>${creatorDetails(k)}</td><td>${k.deviceCount} / ${k.deviceLimit}</td><td>${k.expiresAt ? new Date(k.expiresAt).toLocaleString() : 'Never'}</td><td><span class="tag ${stateClass(k)}">${state(k)}</span></td></tr>`).join('') || '<tr><td colspan="4">No keys yet</td></tr>';
+  $('keyCards').innerHTML = rows.map(k => `<article class="keyCard customerCard"><div class="customerCardHead"><div><b>${escapeHtml(k.label || '—')}</b><small>•••• ${escapeHtml(k.keyHint || '—')}</small></div><span class="tag ${stateClass(k)}">${state(k)}</span></div>${creatorDetails(k)}</article>`).join('') || '<p class="muted">No keys yet.</p>';
   document.querySelectorAll('#keysBody [data-key], #keyCards [data-key]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
     try { await setKeyStatus({ keyId:button.dataset.key, active:button.dataset.active !== 'true' }); await refreshDashboard(); }
@@ -76,19 +75,20 @@ function showAdminTab(tab) {
   const role = currentPartnerActor?.role || 'admin';
   const isAdmin = role === 'admin';
   const views = isAdmin ? {
-    overview: ['adminCreditOverview', 'statsPanel', 'devicesPanel'], keys: ['keysPanel'],
-    partners: ['partnerPanel', 'partnerLimitsPanel'], customers: ['adminCustomersPanel']
+    overview: ['adminCreditOverview'], keys: ['keysPanel'],
+    partners: ['partnerPanel', 'partnerLimitsPanel'], customers: ['adminCustomersPanel'], usage: ['adminUsagePanel', 'statsPanel', 'devicesPanel']
   } : {
     overview: ['partnerOverviewPanel'], keys: ['partnerKeysPanel'],
     partners: role === 'provider' ? [] : ['partnerPanel'], customers: ['providerPanel'], settings: ['partnerSettingsPanel']
   };
   if (!views[tab]) tab = 'overview';
   activeAdminTab = tab;
-  for (const id of ['adminCreditOverview','statsPanel','devicesPanel','keysPanel','partnerPanel','partnerLimitsPanel','adminCustomersPanel','partnerOverviewPanel','partnerKeysPanel','providerPanel','partnerSettingsPanel']) {
+  for (const id of ['adminCreditOverview','adminUsagePanel','statsPanel','devicesPanel','keysPanel','partnerPanel','partnerLimitsPanel','adminCustomersPanel','partnerOverviewPanel','partnerKeysPanel','providerPanel','partnerSettingsPanel']) {
     setVisible(id, views[tab].includes(id));
   }
   document.querySelector('[data-admin-tab="partners"]').classList.toggle('hidden', !isAdmin && role === 'provider');
   document.querySelector('[data-admin-tab="settings"]').classList.toggle('hidden', isAdmin);
+  document.querySelector('[data-admin-tab="usage"]').classList.toggle('hidden', !isAdmin);
   setVisible('providerError', !isAdmin);
   document.querySelector('[data-admin-tab="keys"]').textContent = isAdmin ? 'Keys' : 'My licenses';
   document.querySelectorAll('[data-admin-tab]').forEach(button => {
@@ -192,7 +192,7 @@ async function refreshDashboard() {
   setVisible('partnerOverviewActivityEmpty', recentEvents.length === 0);
   $('partnerOverviewActivity').classList.toggle('hidden', recentEvents.length === 0);
   $('accountsBody').innerHTML = allAccounts.map(a => `<tr><td><b>${escapeHtml(a.displayName)}</b><br><small>${escapeHtml(a.email)}</small></td><td>${escapeHtml(a.role)}</td><td>${escapeHtml(a.parentName || 'Admin')}</td><td>${a.credits}</td><td><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></td><td>${manage(a)}${details(a)}</td></tr>`).join('') || '<tr><td colspan="6">No accounts to show</td></tr>';
-  $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span><small>Created ${escapeHtml(formatDate(a.createdAt))}</small></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
+  $('accountsCards').innerHTML = allAccounts.map(a => `<article class="accountCard"><div class="accountCardHead"><div><b>${escapeHtml(a.displayName)}</b><small>${escapeHtml(a.role)} · under ${escapeHtml(a.parentName || 'Admin')}</small></div><strong>${a.credits} <small>credits</small></strong></div><div class="accountCardStatus"><span class="tag ${a.active?'on':'off'}">${a.active?'Active':'Disabled'}</span></div>${details(a)}${manage(a)}</article>`).join('') || '<p class="muted">No accounts to show.</p>';
   document.querySelectorAll('#accountsBody tr, #accountsCards .accountCard').forEach(row => {
     const role = row.querySelector('[data-role-for]');
     const account = role && allAccounts.find(item => item.uid === role.dataset.roleFor);
@@ -271,14 +271,16 @@ async function refreshDashboard() {
   $('windowsCount').textContent = result.platformCounts.windows;
   try {
     const credits = (await loadAdminCreditSummary()).data;
-    $('creditsAllocated').textContent = Number(credits.allocated || 0).toLocaleString();
+    $('creditsAllocated').textContent = Number(credits.totalAllocated ?? (Number(credits.allocated || 0) + Number(credits.adjustmentNet || 0))).toLocaleString();
+    $('creditsInitialAllocation').textContent = Number(credits.allocated || 0).toLocaleString();
+    $('creditsAdminAdjustments').textContent = Number(credits.adjustmentNet || 0).toLocaleString();
     $('creditsUsed').textContent = Number(credits.used || 0).toLocaleString();
     $('creditsHeld').textContent = Number(credits.held || 0).toLocaleString();
     $('creditsTransferred').textContent = Number(credits.transferred || 0).toLocaleString();
     $('creditsReconciliation').textContent = Number(credits.reconciliation || 0).toLocaleString();
-    $('creditOverviewNote').textContent = `Net Admin adjustments: ${Number(credits.adjustmentNet || 0).toLocaleString()} credits. A zero reconciliation means Admin allocations and adjustments equal license usage plus partner balances.`;
+    $('creditOverviewNote').textContent = 'Total allocated includes initial Distributor allocations plus signed Admin credit adjustments. Transfers between partners do not create additional credits.';
   } catch {
-    for (const id of ['creditsAllocated','creditsUsed','creditsHeld','creditsTransferred','creditsReconciliation']) $(id).textContent = '—';
+    for (const id of ['creditsAllocated','creditsInitialAllocation','creditsAdminAdjustments','creditsUsed','creditsHeld','creditsTransferred','creditsReconciliation']) $(id).textContent = '—';
     $('creditOverviewNote').textContent = 'Credit totals are temporarily unavailable. The rest of the Admin dashboard has loaded.';
   }
   adminKeys = result.keys;
@@ -299,7 +301,8 @@ async function refreshAdminProviderDashboard() {
   $('adminCustomerSummary').textContent = `${data.customers.length} assigned customer device${data.customers.length === 1 ? '' : 's'}${data.hasMore ? ' · showing the 500 most recently updated' : ''}`;
   const labels = { active: 'Active', grace: 'Grace period', expired: 'Expired', disabled: 'Disabled' };
   $('adminCustomersBody').innerHTML = data.customers.map(customer => `<tr><td>${escapeHtml(customer.customerLabel)}</td><td>${escapeHtml(customer.providerName)}<br><small>${escapeHtml(customer.partnerRole || 'partner')} · under ${escapeHtml(customer.parentName || 'Admin')}</small><details class="accountDetails"><summary>Key details</summary><div class="detailGrid"><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Creator ID</span><code>${escapeHtml(customer.createdBy || '—')}</code><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Parent account ID</span><code>${escapeHtml(customer.parentUid || '—')}</code><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div></details></td><td><code class="deviceReference">${escapeHtml(customer.deviceId || '—')}</code></td><td>${escapeHtml(customer.portalMac || '—')}</td><td>${escapeHtml(customer.platform || '—')}</td><td>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</td><td><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span><br>${escapeHtml(formatDate(customer.licenseExpiresAt))}</td><td>${escapeHtml(formatDate(customer.portalExpiresAt))}</td><td>${customer.lastSyncedAt ? escapeHtml(new Date(customer.lastSyncedAt).toLocaleString()) : 'Never'}</td><td><button class="textButton" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable' : 'Enable'}</button></td></tr>`).join('') || '<tr><td colspan="10">No provider-assigned customer devices yet</td></tr>';
-  $('adminCustomersBody').onclick = async event => {
+  $('adminCustomerCards').innerHTML = data.customers.map(customer => `<article class="customerCard adminCustomerCard"><div class="customerCardHead"><div><b>${escapeHtml(customer.customerLabel)}</b><small>${escapeHtml(customer.providerName)} · ${escapeHtml(customer.partnerRole || 'partner')}</small></div><span class="tag ${customer.licenseState === 'active' ? 'on' : 'off'}">${escapeHtml(labels[customer.licenseState] || 'Unknown')}</span></div><p class="customerCardExpiry">License until <b>${escapeHtml(formatDate(customer.licenseExpiresAt))}</b></p><details class="accountDetails"><summary>Device, portal & account details</summary><div class="detailGrid"><span>Parent account</span><b>${escapeHtml(customer.parentName || 'Admin')}</b><span>Created by</span><b>${escapeHtml(customer.createdByName || '—')}</b><span>Creator email</span><b>${escapeHtml(customer.createdByEmail || '—')}</b><span>Device ID</span><code>${escapeHtml(customer.deviceId || '—')}</code><span>Portal MAC</span><code>${escapeHtml(customer.portalMac || '—')}</code><span>Platform</span><b>${escapeHtml(customer.platform || '—')}</b><span>Portal</span><b>${escapeHtml(customer.portalName)} · ${escapeHtml(customer.portalHost || 'host unavailable')}${customer.portalActive ? '' : ' · inactive'}</b><span>Portal expiry</span><b>${escapeHtml(formatDate(customer.portalExpiresAt))}</b><span>Last sync</span><b>${escapeHtml(formatDateTime(customer.lastSyncedAt))}</b><span>License ID</span><code>${escapeHtml(customer.licenseId)}</code></div><button class="textButton adminLicenseAction" data-admin-license="${escapeHtml(customer.licenseId)}" data-active="${customer.active}">${customer.active ? 'Disable license' : 'Enable license'}</button></details></article>`).join('') || '<p class="muted">No customer devices yet.</p>';
+  $('adminCustomersBody').onclick = $('adminCustomerCards').onclick = async event => {
     const button = event.target.closest('[data-admin-license]'); if (!button) return;
     const active = button.dataset.active !== 'true';
     if (!confirm(`${active ? 'Enable' : 'Disable'} this customer app license?`)) return;
