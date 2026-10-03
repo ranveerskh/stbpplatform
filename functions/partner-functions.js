@@ -696,9 +696,12 @@ const callables = {
     }
     const assignment = assignmentSnap.data();
     const keyRef = registrationKeys.doc(assignment.licenseId), ledgerRef = ledger.doc();
+    const registrationRef = keyRef.collection('devices').doc(deviceHash);
     let renewal;
     await db.runTransaction(async tx => {
-      const [providerSnap, currentAssignment, keySnap] = await Promise.all([tx.get(accounts.doc(actor.uid)), tx.get(assignmentRef), tx.get(keyRef)]);
+      const [providerSnap, currentAssignment, keySnap, registrationSnap] = await Promise.all([
+        tx.get(accounts.doc(actor.uid)), tx.get(assignmentRef), tx.get(keyRef), tx.get(registrationRef)
+      ]);
       if (!providerSnap.exists || providerSnap.data().active !== true || !currentAssignment.exists || currentAssignment.data().ownerUid !== actor.uid || currentAssignment.data().active !== true) {
         fail('failed-precondition', 'Provider or customer device is no longer active. Refresh and retry.');
       }
@@ -717,6 +720,7 @@ const callables = {
       tx.update(keyRef, { trial: false, trialUntil: FieldValue.delete(), expiresAt: Timestamp.fromMillis(licenseExpiry),
         graceUntil: Timestamp.fromMillis(licenseGrace), renewedAt: stamp(), renewedBy: actor.uid,
         durationMonths: integer(keySnap.data().durationMonths, 12) + years * 12 });
+      if (registrationSnap.exists) tx.update(registrationRef, { active: true, deleteAt: Timestamp.fromMillis(licenseGrace + 365 * 24 * 60 * 60 * 1000) });
       tx.create(ledgerRef, { type: convertingTrial ? 'license_issued' : 'license_renewal', fromUid: actor.uid, toUid: deviceHash, amount: years, durationYears: years, actorUid: actor.uid, createdAt: stamp() });
       renewal = { expiresAt: new Date(licenseExpiry).toISOString(), graceUntil: new Date(licenseGrace).toISOString(), remainingCredits: balance - years, durationYears: years, activatedFromTrial: convertingTrial };
     });

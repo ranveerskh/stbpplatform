@@ -228,6 +228,7 @@ async function test() {
   assert.equal(paidTrialKey.trial, false);
   assert(Math.abs(paidTrialKey.expiresAt.toMillis() - addMonthsUtc(Date.now(), 24)) < 5000);
   assert.equal(paidTrialKey.graceUntil.toMillis(), paidTrialKey.expiresAt.toMillis() + 7 * 24 * 60 * 60 * 1000);
+  assert.equal((await trialKeyRef.collection('devices').doc(trialPairing.deviceHash).get()).data().deleteAt.toMillis(), paidTrialKey.graceUntil.toMillis() + 365 * 24 * 60 * 60 * 1000);
   assert.equal((await syncDevice(trialPairing)).trial, false, 'The app sync reports paid license status after trial activation.');
   const trialLedger = (await db.collection('creditLedger').where('toUid', '==', trialPairing.deviceHash).get()).docs.map(doc => doc.data());
   assert.equal(trialLedger.length, 1);
