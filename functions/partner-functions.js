@@ -362,6 +362,30 @@ const callables = {
     return { customers, limit: 500, hasMore: assignmentSnap.size === 500 };
   }),
 
+  adminListPairingProfiles: onCall({ region }, async request => {
+    const actor = await requireActor(request);
+    if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
+    const partnerUid = cleanText(request.data?.partnerUid, 128);
+    if (!partnerUid) fail('invalid-argument', 'Choose the partner account that will own this customer.');
+    const [partnerSnap, profileSnap] = await Promise.all([
+      accounts.doc(partnerUid).get(),
+      portalProfiles.where('ownerUid', '==', partnerUid).limit(250).get()
+    ]);
+    if (!partnerSnap.exists || partnerSnap.data().active !== true || !accountRoles.has(partnerSnap.data().role)) {
+      fail('not-found', 'Choose an active Distributor, Reseller, or Provider account.');
+    }
+    const partner = partnerSnap.data();
+    const profiles = profileSnap.docs.map(doc => {
+      const profile = doc.data();
+      let host = '';
+      try { host = new URL(profile.portalUrl).hostname; } catch {}
+      return { id: doc.id, name: cleanText(profile.name, 100), host, active: portalProfileIsActive(profile),
+        expiresAt: profile.expiresAt?.toDate?.().toISOString?.() || null };
+    }).filter(profile => profile.active);
+    return { partner: { uid: partnerUid, displayName: cleanText(partner.displayName, 100),
+      role: partner.role, credits: integer(partner.credits, 0) }, profiles };
+  }),
+
   adminCreateDistributor: onCall({ region }, async request => {
     const actor = await requireActor(request);
     if (actor.role !== 'admin') fail('permission-denied', 'Admin access is required.');
@@ -482,9 +506,6 @@ const callables = {
       }
       return false;
     };
-    const childRoleError = permittedChildRole
-      ? `This account has child accounts that must be ${permittedChildRole}s. Reassign or move the incompatible child accounts before changing this role.`
-      : 'This account still has child accounts. Reassign or move them before changing this role to Provider.';
     await db.runTransaction(async tx => {
       const [latest, childSnapshot] = await Promise.all([
         tx.get(targetRef), tx.get(accounts.where('parentUid', '==', targetUid))
@@ -505,7 +526,17 @@ const callables = {
         if (!await accountPathIncludes(tx, targetUid, actor.uid)) fail('permission-denied', 'You can edit accounts only in your own branch.');
         if (parentUid && !await accountPathIncludes(tx, parentUid, actor.uid)) fail('permission-denied', 'The new parent must remain in your branch.');
       }
-      if (childSnapshot.docs.some(doc => doc.data().role !== permittedChildRole)) fail('failed-precondition', childRoleError);
+      const incompatibleChildren = childSnapshot.docs.filter(doc => permittedChildRole
+        ? doc.data().role !== permittedChildRole
+        : true);
+      if (incompatibleChildren.length) {
+        const labels = incompatibleChildren.slice(0, 3).map(doc => cleanText(doc.data().displayName || doc.data().email, 100)).filter(Boolean);
+        const childNames = labels.length ? ` Affected child accounts: ${labels.join(', ')}.` : '';
+        const allowed = permittedChildRole
+          ? `must all be ${permittedChildRole}s`
+          : 'must be moved because Provider accounts cannot have child accounts';
+        fail('failed-precondition', `This account has child accounts that ${allowed}.${childNames} Reassign the incompatible child accounts before changing this role.`);
+      }
       tx.update(targetRef, { role: newRole, parentUid, updatedAt: stamp(), roleUpdatedAt: stamp(), roleUpdatedBy: actor.uid });
     });
     await auditEvent(actor.uid, 'partner_role_changed', targetUid, { oldRole: target.role, newRole, oldParentUid: target.parentUid || null, newParentUid: parentUid });
@@ -624,64 +655,75 @@ async function beginPairing(req, res) {
 
 async function completePairing(request) {
   const actor = await requireActor(request);
-  if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required to pair customer devices.');
+  if (actor.role !== 'admin' && !accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required to pair customer devices.');
+  const partnerUid = actor.role === 'admin' ? cleanText(request.data?.partnerUid, 128) : actor.uid;
+  if (actor.role === 'admin' && !partnerUid) fail('invalid-argument', 'Choose the partner account that will own this customer.');
+  if (actor.role !== 'admin' && request.data?.partnerUid) fail('permission-denied', 'Partners can pair customers only into their own account.');
   const code = cleanText(request.data?.pairingCode, 20).toUpperCase();
   const profileId = cleanText(request.data?.profileId, 128);
   const label = cleanText(request.data?.customerLabel, 100) || 'Customer device';
   const durationYears = integer(request.data?.durationYears, -1);
   if (durationYears < 1 || durationYears > 10) fail('invalid-argument', 'Choose a license term from 1 to 10 years.');
   if (!/^[A-F0-9]{12}$/.test(code) || !profileId) fail('invalid-argument', 'Enter the pairing code and select a portal profile.');
-  const codeRef = pairingCodes.doc(sha256(code)), profileRef = portalProfiles.doc(profileId), providerRef = accounts.doc(actor.uid);
+  const codeRef = pairingCodes.doc(sha256(code)), profileRef = portalProfiles.doc(profileId), ownerRef = accounts.doc(partnerUid);
   const licenseKey = `STB-${randomBytes(16).toString('hex').toUpperCase()}`;
   const keyRef = registrationKeys.doc(sha256(licenseKey)), ledgerRef = ledger.doc();
+  const creatorName = actor.role === 'admin'
+    ? cleanText(request.auth.token?.name || request.auth.token?.email || 'Admin', 100)
+    : cleanText(actor.displayName, 100) || cleanText(actor.email, 254);
+  const creatorEmail = cleanText(actor.email || request.auth.token?.email, 254).toLowerCase();
   let result;
   await db.runTransaction(async tx => {
-    const [codeSnap, profileSnap, providerSnap] = await Promise.all([tx.get(codeRef), tx.get(profileRef), tx.get(providerRef)]);
-    if (!codeSnap.exists || !profileSnap.exists || !providerSnap.exists) fail('not-found', 'Pairing request or portal profile was not found.');
-    const pairing = codeSnap.data(), profile = profileSnap.data(), provider = providerSnap.data();
+    const [codeSnap, profileSnap, ownerSnap] = await Promise.all([tx.get(codeRef), tx.get(profileRef), tx.get(ownerRef)]);
+    if (!codeSnap.exists || !profileSnap.exists || !ownerSnap.exists) fail('not-found', 'Pairing request, partner account, or portal profile was not found.');
+    const pairing = codeSnap.data(), profile = profileSnap.data(), owner = ownerSnap.data();
     if (pairing.state !== 'pending' || pairing.expiresAt.toMillis() <= Date.now()) fail('failed-precondition', 'Pairing code expired or was already used. Ask the customer to create a new code.');
-    if (profile.ownerUid !== actor.uid || !portalProfileIsActive(profile)) fail('permission-denied', 'Select an active, unexpired portal profile owned by your account.');
-    if (provider.active !== true) fail('permission-denied', 'Provider account is disabled.');
+    if (!accountRoles.has(owner.role) || owner.active !== true) fail('failed-precondition', 'The selected partner account is not active.');
+    if (profile.ownerUid !== partnerUid || !portalProfileIsActive(profile)) fail('permission-denied', 'Select an active, unexpired portal profile owned by the selected partner account.');
     const assignmentRef = assignments.doc(pairing.deviceHash), assignmentSnap = await tx.get(assignmentRef);
     const portalMac = pairing.portalMac || (assignmentSnap.exists ? cleanText(assignmentSnap.data().portalMac, 17).toUpperCase() : '');
     let licenseId, expiresAt, graceUntil;
     if (assignmentSnap.exists && assignmentSnap.data().active === true) {
       const oldAssignment = assignmentSnap.data();
-      if (oldAssignment.ownerUid !== actor.uid) fail('already-exists', 'This device is already assigned to another provider. Contact support to transfer it.');
+      if (oldAssignment.ownerUid !== partnerUid) fail('already-exists', 'This device is already assigned to another partner. Contact Admin to transfer it.');
       licenseId = oldAssignment.licenseId;
       const oldKeySnap = await tx.get(registrationKeys.doc(licenseId));
       if (!oldKeySnap.exists || oldKeySnap.data().active !== true) fail('failed-precondition', 'Existing device license is disabled. Contact support.');
       expiresAt = oldKeySnap.data().expiresAt;
       graceUntil = oldKeySnap.data().graceUntil;
       tx.update(assignmentRef, { portalProfileId: profileId, deviceTokenHash: pairing.deviceTokenHash,
-        platform: pairing.platform, portalMac: portalMac || null, customerLabel: label, providerName: cleanText(provider.displayName, 100), updatedAt: stamp() });
-      result = { existingLicense: true };
+        platform: pairing.platform, portalMac: portalMac || null, customerLabel: label, providerName: cleanText(owner.displayName, 100), updatedAt: stamp() });
+      result = { existingLicense: true, creditsUsed: 0, remainingCredits: integer(owner.credits, 0) };
     } else {
-      const balance = integer(provider.credits, 0);
-      if (balance < durationYears) fail('failed-precondition', `You need ${durationYears} credits to activate this device for ${durationYears} year${durationYears === 1 ? '' : 's'}.`);
+      const balance = integer(owner.credits, 0);
+      if (balance < durationYears) {
+        const subject = actor.role === 'admin' ? `${cleanText(owner.displayName, 100) || 'The selected partner'} needs` : 'You need';
+        fail('failed-precondition', `${subject} ${durationYears} credits to activate this device for ${durationYears} year${durationYears === 1 ? '' : 's'}.`);
+      }
       const activatedAtMillis = Date.now(), expiresAtMillis = addMonthsUtc(activatedAtMillis, durationYears * 12), graceUntilMillis = expiresAtMillis + 7 * 24 * 60 * 60 * 1000;
       expiresAt = Timestamp.fromMillis(expiresAtMillis);
       graceUntil = Timestamp.fromMillis(graceUntilMillis);
       licenseId = keyRef.id;
-      tx.update(providerRef, { credits: balance - durationYears, updatedAt: stamp() });
-      tx.create(ledgerRef, { type: 'license_issued', fromUid: actor.uid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
-      tx.create(keyRef, { label, keyHint: licenseKey.slice(-4), active: true, deviceLimit: 1, ownerUid: actor.uid, ownerRole: actor.role, durationMonths: durationYears * 12,
+      tx.update(ownerRef, { credits: balance - durationYears, updatedAt: stamp() });
+      tx.create(ledgerRef, { type: 'license_issued', fromUid: partnerUid, toUid: pairing.deviceHash, amount: durationYears, durationYears, actorUid: actor.uid, createdAt: stamp() });
+      tx.create(keyRef, { label, keyHint: licenseKey.slice(-4), active: true, deviceLimit: 1, ownerUid: partnerUid, ownerRole: owner.role, durationMonths: durationYears * 12,
         activatedAt: Timestamp.fromMillis(activatedAtMillis), expiresAt, graceUntil,
-        createdAt: stamp(), createdBy: actor.uid, createdByName: cleanText(actor.displayName, 100) || cleanText(actor.email, 254),
-        createdByEmail: cleanText(actor.email, 254), portalProfileId: profileId });
-      tx.create(assignmentRef, { deviceHash: pairing.deviceHash, licenseId, ownerUid: actor.uid, portalProfileId: profileId,
+        createdAt: stamp(), createdBy: actor.uid, createdByName: creatorName,
+        createdByEmail: creatorEmail, portalProfileId: profileId });
+      tx.create(assignmentRef, { deviceHash: pairing.deviceHash, licenseId, ownerUid: partnerUid, portalProfileId: profileId,
         deviceTokenHash: pairing.deviceTokenHash, platform: pairing.platform, portalMac: portalMac || null, customerLabel: label,
-        providerName: cleanText(provider.displayName, 100), active: true, createdAt: stamp(), updatedAt: stamp(), lastSyncedAt: stamp() });
+        providerName: cleanText(owner.displayName, 100), active: true, createdAt: stamp(), updatedAt: stamp(), lastSyncedAt: stamp(), createdBy: actor.uid });
       tx.create(keyRef.collection('devices').doc(pairing.deviceHash), { active: true, platform: pairing.platform,
         registeredAt: stamp(), lastSeen: stamp(), deleteAt: Timestamp.fromMillis(graceUntilMillis) });
-      result = { existingLicense: false, remainingCredits: balance - durationYears, durationYears };
+      result = { existingLicense: false, creditsUsed: durationYears, remainingCredits: balance - durationYears, durationYears };
     }
-    tx.update(codeRef, { state: 'completed', providerUid: actor.uid, profileId, assignmentId: pairing.deviceHash,
+    tx.update(codeRef, { state: 'completed', providerUid: partnerUid, ownerUid: partnerUid, pairedByUid: actor.uid, profileId, assignmentId: pairing.deviceHash,
       licenseId, completedAt: stamp() });
     result = { ...result, deviceId: pairing.deviceHash, portalMac: portalMac || null, licenseId, expiresAt: expiresAt?.toDate?.().toISOString?.() || null,
-      graceUntil: graceUntil?.toDate?.().toISOString?.() || null };
+      graceUntil: graceUntil?.toDate?.().toISOString?.() || null, ownerUid: partnerUid, ownerRole: owner.role,
+      ownerName: cleanText(owner.displayName, 100) };
   });
-  await auditEvent(actor.uid, 'device_paired', result.licenseId, { profileId, existingLicense: result.existingLicense });
+  await auditEvent(actor.uid, 'device_paired', result.licenseId, { profileId, ownerUid: partnerUid, existingLicense: result.existingLicense });
   return result;
 }
 
