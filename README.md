@@ -34,6 +34,20 @@ Open the Netlify URL and sign in with Firebase Email/Password. Admin access stil
 
 The partner backend enforces these agreed limits by default: Distributor creation starts at 500 credits or more; each Distributor-to-Reseller allocation is capped at 250; each Reseller-to-Provider transfer is at least 20. Admin can change these in the dashboard and adjust a partner's credits with an audited transaction. Distributors, Resellers, and Providers can pair and manage customer devices and portal profiles assigned to their own account. A new activation or renewal costs one credit per year, with selectable terms from one to ten years; license grace lasts seven days after expiry. A partner can switch an individual customer's portal to one of their own active profiles, and the app receives the change on its next sync. The Admin-only customer view can inspect and enable/disable app licenses across the network. Android/Windows pairing client integration is still pending.
 
+## Admin deletion and customer portal changes
+
+Admin can use **Delete account** for any Distributor, Reseller, or Provider, including archived accounts. The confirmation dialog lists the whole affected branch, its customer count, portal profiles, and unused credits. Deleting a parent also deletes its child partner accounts and their customers; type `DELETE` only after reviewing this scope. **Delete customer** removes that customer's assignment and app license without deleting the owning partner or portal profile.
+
+Unused branch credits return to the surviving parent in a ledgered transaction. If the top-level Distributor is deleted, negative Admin adjustments retire its branch's outstanding allocation. Paid license credits stay spent. Operational accounts, profiles, keys, device subcollections, and associated pairing records are removed; ledger, audit, minimal deleted-account attribution, and hashed device trial history remain. A changed branch or balance invalidates the confirmation, and retries cannot return credits twice. Firebase Auth cleanup follows the Firestore transaction; unfinished cleanup is shown in Partners with **Retry cleanup**. Deleted account records cannot authorize even if Auth cleanup is pending. Large deletions remain subject to Firestore transaction size and execution limits; a failed transaction does not partially remove records or settle credits.
+
+Customer controls use expandable cards on PCs and phones. Admin can switch any customer's portal to an active, unexpired profile belonging to that customer's partner; partners can switch only their own customers. This updates only the selected assignment and takes effect on its next app sync, without changing credits, license expiry, or other customers. Profile URL editing remains a separate bulk action.
+
+## Verification
+
+Install root and Functions dependencies, then run `npm run test:emulator`. This uses only `demo-stbpplatform` and covers roles, transfers, terms/grace, pairing/trial history, portal switching, cascading deletion, Auth/device cleanup, stale confirmations, retry safety, and ledger reconciliation.
+
+Run `npx playwright install chromium` and `npm run test:ui` for desktop (1366px) and phone (390px) checks across Admin, Distributor, Reseller, and Provider. These exercise the real dashboard HTML/JavaScript/CSS with Firebase transport fixtures, including portal selection, switch, error/retry, customer isolation, overflow, and deletion confirmation. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` optionally selects an existing Chromium binary. The pull-request workflow runs both suites on Node 22 and Java 21 without production credentials. Live Firebase deployment, IAM/index availability, production data, and an actual paired PC syncing the changed portal still require a staging/live check.
+
 ## App API
 
 Netlify proxies `/api/**` to the `appApi` HTTPS function:

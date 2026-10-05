@@ -8,6 +8,7 @@ admin.initializeApp();
 const db = admin.firestore();
 const partnerFunctions = require('./partner-functions');
 Object.assign(exports, partnerFunctions.callables);
+Object.assign(exports, require('./admin-deletion'));
 const region = 'northamerica-northeast1';
 const settingsRef = db.collection('platform').doc('settings');
 const keysRef = db.collection('registrationKeys');
