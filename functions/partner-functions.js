@@ -207,12 +207,19 @@ const callables = {
     const accountNames = new Map(partnerRows.map(([uid, data]) => [uid, cleanText(data.displayName, 100)]));
     accountNames.set(actor.uid, actor.role === 'admin' ? 'Admin' : cleanText(actor.displayName, 100) || 'You');
     const recentLedgerSnap = await ledger.orderBy('createdAt', 'desc').limit(100).get();
+    const missingAccountUids = [...new Set(recentLedgerSnap.docs.flatMap(doc => {
+      const row = doc.data();
+      return [row.fromUid, row.toUid, row.actorUid].filter(uid => uid && !accountNames.has(uid));
+    }))];
+    const deletedAccounts = missingAccountUids.length ? await db.getAll(...missingAccountUids.map(uid => db.collection('deletedPartnerAccounts').doc(uid))) : [];
+    deletedAccounts.filter(doc => doc.exists).forEach(doc => accountNames.set(doc.id, `${cleanText(doc.data().displayName, 100)} (deleted)`));
     const visibleUids = new Set([actor.uid, ...partnerRows.map(([uid]) => uid)]);
     const recentActivity = recentLedgerSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(item => actor.role === 'admin' || visibleUids.has(item.fromUid) || visibleUids.has(item.toUid))
       .slice(0, 60).map(item => ({ type: cleanText(item.type, 40), amount: integer(item.amount, 0), durationYears: integer(item.durationYears, 0),
-        fromUid: item.fromUid || null, toUid: item.toUid || null, actorUid: item.actorUid || null, fromName: item.fromUid ? accountNames.get(item.fromUid) || 'Partner account' : 'Admin',
-        toName: item.toUid ? accountNames.get(item.toUid) || 'Customer device' : '—',
+        reason: cleanText(item.reason, 40),
+        fromUid: item.fromUid || null, toUid: item.toUid || null, actorUid: item.actorUid || null, fromName: item.fromUid ? cleanText(item.fromName, 100) || accountNames.get(item.fromUid) || 'Partner account' : 'Admin',
+        toName: item.toUid ? cleanText(item.toName, 100) || accountNames.get(item.toUid) || 'Customer device' : '—',
         actorName: accountNames.get(item.actorUid) || (item.actorUid ? 'Admin' : '—'),
         createdAt: item.createdAt?.toDate?.().toISOString?.() || null }));
     const deviceEvents = recentActivity.filter(item => item.toUid && /^[a-f0-9]{64}$/.test(item.toUid));
@@ -222,7 +229,11 @@ const callables = {
       if (item.toUid && deviceNames.has(item.toUid)) item.toName = deviceNames.get(item.toUid);
     });
     const dashboardLimits = await readLimits();
+    const pendingDeletions = actor.role === 'admin'
+      ? (await db.collection('platformDeletions').where('authCleanupPending', '==', true).limit(100).get()).docs.map(doc => doc.data().summary)
+      : [];
     return {
+      pendingDeletions,
       account: { uid: actor.uid, role: actor.role, displayName: cleanText(actor.displayName, 100),
         email: cleanText(actor.email, 254), credits: integer(actor.credits, 0) },
       limits: actor.role === 'admin' ? dashboardLimits : null,
@@ -403,10 +414,11 @@ const callables = {
     const providerUids = unique(rows.map(row => row.ownerUid));
     const licenseIds = unique(rows.map(row => row.licenseId));
     const fetchRefs = refs => refs.length ? db.getAll(...refs) : Promise.resolve([]);
-    const [profileDocs, providerDocs, licenseDocs] = await Promise.all([
+    const [profileDocs, providerDocs, licenseDocs, availableProfiles] = await Promise.all([
       fetchRefs(profileIds.map(id => portalProfiles.doc(id))),
       fetchRefs(providerUids.map(uid => accounts.doc(uid))),
-      fetchRefs(licenseIds.map(id => registrationKeys.doc(id)))
+      fetchRefs(licenseIds.map(id => registrationKeys.doc(id))),
+      portalProfiles.where('active', '==', true).get()
     ]);
     const parentUids = unique(providerDocs.filter(doc => doc.exists).map(doc => doc.data().parentUid));
     const parentDocs = await fetchRefs(parentUids.map(uid => accounts.doc(uid)));
@@ -443,13 +455,21 @@ const callables = {
         licenseState: !key.active || row.active !== true ? 'disabled' : inTrial ? 'trial' : !expiresAt || expiresAt > now ? 'active' : inGrace ? 'grace' : 'expired',
         licenseExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         portalName: cleanText(profile.name, 100) || 'Unavailable profile', portalHost,
+        portalProfileId: cleanText(row.portalProfileId, 128),
         portalActive: portalProfileIsActive(profile),
         portalExpiresAt: profile.expiresAt?.toDate?.().toISOString?.() || null,
         platform: cleanText(row.platform, 20),
         lastSyncedAt: row.lastSyncedAt?.toDate?.().toISOString?.() || null
       };
     });
-    return { customers, limit: 500, hasMore: assignmentSnap.size === 500 };
+    const profiles = availableProfiles.docs.filter(doc => portalProfileIsActive(doc.data()) &&
+      providerMap.get(doc.data().ownerUid)?.active === true).map(doc => {
+      const profile = doc.data();
+      let host = '';
+      try { host = new URL(profile.portalUrl).hostname; } catch {}
+      return { id: doc.id, ownerUid: profile.ownerUid, name: cleanText(profile.name, 100), host, active: true };
+    });
+    return { customers, profiles, limit: 500, hasMore: assignmentSnap.size === 500 };
   }),
 
   adminListPairingProfiles: onCall({ region }, async request => {
@@ -641,8 +661,12 @@ const callables = {
     const expiryMillis = request.data?.expiresAt == null || request.data?.expiresAt === '' ? null : Number(request.data.expiresAt);
     if (expiryMillis !== null && (!Number.isFinite(expiryMillis) || expiryMillis <= Date.now())) fail('invalid-argument', 'Portal expiry must be a future date and time.');
     const ref = portalProfiles.doc();
-    await ref.set({ ownerUid: actor.uid, name, portalUrl, active: true, revision: 1,
-      expiresAt: expiryMillis === null ? null : Timestamp.fromMillis(expiryMillis), createdAt: stamp(), updatedAt: stamp() });
+    await db.runTransaction(async tx => {
+      const owner = await tx.get(accounts.doc(actor.uid));
+      if (!owner.exists || owner.data().active !== true) fail('permission-denied', 'An active partner account is required.');
+      tx.create(ref, { ownerUid: actor.uid, name, portalUrl, active: true, revision: 1,
+        expiresAt: expiryMillis === null ? null : Timestamp.fromMillis(expiryMillis), createdAt: stamp(), updatedAt: stamp() });
+    });
     await auditEvent(actor.uid, 'portal_profile_created', ref.id, { name });
     return { profileId: ref.id, name, expiresAt: expiryMillis, revision: 1 };
   }),
@@ -665,18 +689,22 @@ const callables = {
 
   partnerSwitchDevicePortal: onCall({ region }, async request => {
     const actor = await requireActor(request);
-    if (!accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
+    if (actor.role !== 'admin' && !accountRoles.has(actor.role)) fail('permission-denied', 'An active partner account is required.');
     const deviceHash = cleanText(request.data?.deviceRef, 128);
     const profileId = cleanText(request.data?.profileId, 128);
     if (!/^[a-f0-9]{64}$/.test(deviceHash) || !profileId) fail('invalid-argument', 'Choose a customer device and portal.');
     const assignmentRef = assignments.doc(deviceHash), profileRef = portalProfiles.doc(profileId);
     await db.runTransaction(async tx => {
       const [assignmentSnap, profileSnap] = await Promise.all([tx.get(assignmentRef), tx.get(profileRef)]);
-      if (!assignmentSnap.exists || assignmentSnap.data().active !== true || assignmentSnap.data().ownerUid !== actor.uid) {
+      if (!assignmentSnap.exists || (actor.role !== 'admin' && assignmentSnap.data().ownerUid !== actor.uid)) {
         fail('permission-denied', 'You can switch portals only for customer devices assigned by your account.');
       }
-      if (!profileSnap.exists || !portalProfileIsActive(profileSnap.data()) || profileSnap.data().ownerUid !== actor.uid) {
-        fail('permission-denied', 'Choose an active portal profile owned by your account.');
+      const assignment = assignmentSnap.data();
+      if (assignment.archived === true) fail('failed-precondition', 'Restore this customer before switching portals.');
+      const owner = await tx.get(accounts.doc(assignment.ownerUid));
+      if (!owner.exists || owner.data().active !== true) fail('failed-precondition', 'Restore or enable the customer\'s partner account first.');
+      if (!profileSnap.exists || !portalProfileIsActive(profileSnap.data()) || profileSnap.data().ownerUid !== assignment.ownerUid) {
+        fail('permission-denied', 'Choose an active portal profile owned by the customer\'s partner account.');
       }
       tx.update(assignmentRef, { portalProfileId: profileId, updatedAt: stamp(), portalChangedAt: stamp(), portalChangedBy: actor.uid });
     });
@@ -779,6 +807,7 @@ async function completePairing(request) {
     if (!accountRoles.has(owner.role) || owner.active !== true) fail('failed-precondition', 'The selected partner account is not active.');
     if (profile.ownerUid !== partnerUid || !portalProfileIsActive(profile)) fail('permission-denied', 'Select an active, unexpired portal profile owned by the selected partner account.');
     const assignmentRef = assignments.doc(pairing.deviceHash), assignmentSnap = await tx.get(assignmentRef);
+    const deletedDevice = await tx.get(db.collection('deletedCustomerDevices').doc(pairing.deviceHash));
     const portalMac = pairing.portalMac || (assignmentSnap.exists ? cleanText(assignmentSnap.data().portalMac, 17).toUpperCase() : '');
     let licenseId, expiresAt, graceUntil;
     if (assignmentSnap.exists && assignmentSnap.data().active === true) {
@@ -793,7 +822,7 @@ async function completePairing(request) {
         platform: pairing.platform, portalMac: portalMac || null, customerLabel: label, providerName: cleanText(owner.displayName, 100), updatedAt: stamp() });
       result = { existingLicense: true, creditsUsed: 0, remainingCredits: integer(owner.credits, 0) };
     } else {
-      if (trial && assignmentSnap.exists) fail('failed-precondition', 'This device has already been paired. A 7-day trial is available only once per device; choose a paid license instead.');
+      if (trial && (assignmentSnap.exists || deletedDevice.exists)) fail('failed-precondition', 'This device has already been paired. A 7-day trial is available only once per device; choose a paid license instead.');
       const balance = integer(owner.credits, 0);
       if (!trial && balance < durationYears) {
         const subject = actor.role === 'admin' ? `${cleanText(owner.displayName, 100) || 'The selected partner'} needs` : 'You need';

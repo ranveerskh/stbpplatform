@@ -246,7 +246,7 @@ async function test() {
   assert.equal(syncedProvider.portal.name, 'Provider One B');
   await expectCallableError(
     invoke('partnerSwitchDevicePortal', provider.token, { deviceRef: providerPairing.deviceHash, profileId: (await createPortal(distributor.token, distributor.name, 'A')).profileId }),
-    'owned by your account'
+    "owned by the customer's partner account"
   );
   const expiredProfileId = `expired-${randomBytes(8).toString('hex')}`;
   await db.collection('portalProfiles').doc(expiredProfileId).set({ ownerUid: provider.uid, name: 'Expired provider portal',
@@ -441,7 +441,111 @@ async function test() {
   await invoke('partnerArchiveAccount', adminUser.token, { targetUid: emptyDist.uid, archived: false });
   assert.equal((await invoke('partnerListDashboard', emptyDist.token)).account.role, 'distributor');
 
-  console.log('PASS: role scope/parent rules, child-role blocking, atomic concurrent transfers, pairing, free 7-day trial and paid conversion, portal switching, 1–10 year expiry/renewal, grace period, safe archive/restore, ledger attribution, and customer sync.');
+  // Admin switches each customer's portal within its owning partner's profiles.
+  const adminPortalList = await invoke('adminProviderDashboard', adminUser.token);
+  assert(adminPortalList.profiles.some(profile => profile.id === providerPortalA.profileId && profile.ownerUid === provider.uid));
+  assert(!adminPortalList.profiles.some(profile => profile.id === expiredProfileId));
+  assert.equal(adminPortalList.customers.find(customer => customer.deviceRef === providerPairing.deviceHash).portalProfileId, providerPortalB.profileId);
+  const beforeSwitch = await invoke('adminCreditSummary', adminUser.token);
+  await invoke('partnerSwitchDevicePortal', adminUser.token, { deviceRef: providerPairing.deviceHash, profileId: providerPortalA.profileId });
+  assert.equal((await syncDevice(providerPairing)).portal.name, 'Provider One A');
+  await expectCallableError(invoke('partnerSwitchDevicePortal', adminUser.token,
+    { deviceRef: providerPairing.deviceHash, profileId: distributorPortalA.profileId }), "customer's partner account");
+  await expectCallableError(invoke('partnerSwitchDevicePortal', reseller.token,
+    { deviceRef: providerPairing.deviceHash, profileId: providerPortalB.profileId }), 'assigned by your account');
+  await invoke('partnerArchiveCustomer', adminUser.token, { deviceRef: providerPairing.deviceHash, archived: true });
+  await expectCallableError(invoke('partnerSwitchDevicePortal', adminUser.token,
+    { deviceRef: providerPairing.deviceHash, profileId: providerPortalB.profileId }), 'Restore this customer');
+  await invoke('partnerArchiveCustomer', adminUser.token, { deviceRef: providerPairing.deviceHash, archived: false });
+  assert.deepEqual(await invoke('adminCreditSummary', adminUser.token), beforeSwitch, 'Portal switching never changes credits.');
+
+  const previewDelete = (kind, targetId) => invoke('adminPreviewDeletion', adminUser.token, { kind, targetId });
+  const commitDelete = preview => invoke('adminDeleteRecord', adminUser.token, {
+    kind: preview.kind, targetId: preview.targetId, confirmationToken: preview.confirmationToken, confirmation: 'DELETE'
+  });
+  for (const partner of [distributor, reseller, provider]) {
+    await expectCallableError(invoke('adminPreviewDeletion', partner.token, { kind: 'account', targetId: emptyDist.uid }), 'Admin access');
+    await expectCallableError(invoke('adminDeleteRecord', partner.token, { kind: 'customer', targetId: providerPairing.deviceHash }), 'Admin access');
+  }
+  const deleteCustomerPreview = await previewDelete('customer', providerPairing.deviceHash);
+  await expectCallableError(invoke('adminDeleteRecord', adminUser.token, { ...deleteCustomerPreview, confirmation: 'wrong' }), 'Type DELETE');
+  const customerCredits = await invoke('adminCreditSummary', adminUser.token);
+  const oldCustomerLedger = await db.collection('creditLedger').get();
+  await commitDelete(deleteCustomerPreview);
+  assert.equal((await db.collection('deviceAssignments').doc(providerPairing.deviceHash).get()).exists, false);
+  assert.equal((await providerKeyRef.get()).exists, false);
+  assert.equal((await providerKeyRef.collection('devices').get()).size, 0);
+  assert.equal((await db.collection('pairingCodes').where('deviceHash', '==', providerPairing.deviceHash).get()).size, 0);
+  assert.equal((await db.collection('creditLedger').get()).size, oldCustomerLedger.size, 'Customer deletion preserves spent credits.');
+  assert.deepEqual(await invoke('adminCreditSummary', adminUser.token), customerCredits);
+  const deletedSync = await postJson(`http://${functionsHost}/${projectId}/${region}/appApi/api/device/sync`,
+    { deviceId: providerPairing.deviceId, deviceToken: providerPairing.deviceToken, platform: 'android', appVersion: '2.0.2' });
+  assert.equal(deletedSync.response.status, 403);
+  // A retry is idempotent; a subsequently paid re-pairing can still be deleted.
+  await commitDelete(deleteCustomerPreview);
+  const newPairing = await seedPairing('deleted-customer', providerPairing.deviceId);
+  await expectCallableError(invoke('partnerCompletePairing', provider.token,
+    { pairingCode: newPairing.pairingCode, profileId: providerPortalA.profileId, trial: true }), 'only once per device');
+  await pair(provider, providerPortalA.profileId, 'Re-paired paid customer', 1, newPairing);
+  const nextDeletePreview = await previewDelete('customer', providerPairing.deviceHash);
+  assert.notEqual(nextDeletePreview.confirmationToken, deleteCustomerPreview.confirmationToken);
+  await commitDelete(nextDeletePreview);
+  assert.equal((await db.collection('deviceAssignments').doc(providerPairing.deviceHash).get()).exists, false);
+
+  // Delete a funded Reseller with children and customers. Return only its unused
+  // branch credits to the surviving Distributor, atomically and with attribution.
+  const resellerDeletePreview = await previewDelete('account', reseller.uid);
+  assert.equal(resellerDeletePreview.accounts, 3);
+  assert(resellerDeletePreview.customers > 0);
+  const distributorBalance = (await account(distributor.uid)).credits;
+  const summaryBeforeBranchDelete = await invoke('adminCreditSummary', adminUser.token);
+  const retainedLedger = (await db.collection('creditLedger').get()).docs.map(doc => doc.id);
+  await commitDelete(resellerDeletePreview);
+  assert.equal((await account(distributor.uid)).credits, distributorBalance + resellerDeletePreview.credits);
+  for (const partner of [reseller, provider, roleProvider]) {
+    assert.equal((await db.collection('partnerAccounts').doc(partner.uid).get()).exists, false);
+    assert.equal((await db.collection('deviceAssignments').where('ownerUid', '==', partner.uid).get()).size, 0);
+    assert.equal((await db.collection('portalProfiles').where('ownerUid', '==', partner.uid).get()).size, 0);
+    assert.equal((await db.collection('registrationKeys').where('ownerUid', '==', partner.uid).get()).size, 0);
+    await assert.rejects(auth.getUser(partner.uid), error => error.code === 'auth/user-not-found');
+    await expectCallableError(invoke('partnerListDashboard', partner.token), 'active partner account');
+  }
+  const retainedAfter = new Set((await db.collection('creditLedger').get()).docs.map(doc => doc.id));
+  assert(retainedLedger.every(id => retainedAfter.has(id)), 'Deleting a branch never deletes its ledger.');
+  const branchDeleteSummary = await invoke('adminCreditSummary', adminUser.token);
+  assert.equal(branchDeleteSummary.held, summaryBeforeBranchDelete.held);
+  assert.equal(branchDeleteSummary.totalAllocated, summaryBeforeBranchDelete.totalAllocated);
+  assert.equal(branchDeleteSummary.reconciliation, 0);
+  const deletedActivity = (await invoke('partnerListDashboard', adminUser.token)).recentActivity;
+  assert(deletedActivity.some(row => row.actorUid === provider.uid && row.actorName === 'Provider One (deleted)'),
+    'Historical partner actions remain attributed after deleting their accounts.');
+  const deleteTransfers = await db.collection('creditLedger').where('reason', '==', 'account_deletion').get();
+  assert(deleteTransfers.docs.some(doc => doc.data().toUid === distributor.uid && doc.data().actorUid === adminUser.uid));
+
+  // A changed balance invalidates the reviewed scope. No partial cleanup occurs.
+  const stalePreview = await previewDelete('account', emptyDist.uid);
+  await invoke('adminAdjustPartnerCredits', adminUser.token, { targetUid: emptyDist.uid, delta: 5 });
+  await expectCallableError(commitDelete(stalePreview), 'changed');
+  assert.equal((await account(emptyDist.uid)).credits, 5);
+  await auth.getUser(emptyDist.uid);
+  const rootDeletePreview = await previewDelete('account', emptyDist.uid);
+  const beforeRootDelete = await invoke('adminCreditSummary', adminUser.token);
+  await commitDelete(rootDeletePreview);
+  const afterRootDelete = await invoke('adminCreditSummary', adminUser.token);
+  assert.equal(afterRootDelete.totalAllocated, beforeRootDelete.totalAllocated - 5);
+  assert.equal(afterRootDelete.held, beforeRootDelete.held - 5);
+  assert.equal(afterRootDelete.reconciliation, 0);
+  const ledgerCountAfterDelete = (await db.collection('creditLedger').get()).size;
+  await commitDelete(rootDeletePreview);
+  assert.equal((await db.collection('creditLedger').get()).size, ledgerCountAfterDelete, 'Retry does not return credits twice.');
+  // Root Distributor deletion cascades too; unrelated partner accounts survive.
+  const distributorDeletePreview = await previewDelete('account', distributor.uid);
+  await commitDelete(distributorDeletePreview);
+  assert.equal((await db.collection('partnerAccounts').doc(distributor.uid).get()).exists, false);
+  assert.equal((await db.collection('partnerAccounts').doc(outsiderDist.uid).get()).exists, true);
+  assert.equal((await db.collection('partnerAccounts').doc(outsiderResellerResult.uid).get()).exists, true);
+  assert.equal((await invoke('adminCreditSummary', adminUser.token)).reconciliation, 0);
+  console.log('PASS: role/parent scope, concurrent transfers, pairing/trial/terms/grace, partner and Admin portal switching, archive/restore, Admin-only cascading deletion, credit return and ledger reconciliation, stale confirmation, retry, trial history, Auth/device cleanup.');
 }
 
 test().catch(error => {
